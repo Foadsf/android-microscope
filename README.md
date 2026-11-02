@@ -64,12 +64,16 @@ beat every input frame.
 
 ## Install
 
-Grab `app-debug.apk` from the latest successful [build run](../../actions/workflows/build.yml)
-(under *Artifacts*), or build it yourself (below). Then:
+Build a release APK (below) and install it:
 
 ```bash
-adb install -r app-debug.apk
+adb install -r microscope.apk
 ```
+
+Prefer a release build for real use. Debug builds are debuggable, which makes Android run the
+pixel loops much slower: on the emulator, a 9-frame stack took 42 s in debug and 27 s in release.
+CI also uploads `app-debug.apk` from every [build run](../../actions/workflows/build.yml) (under
+*Artifacts*), which is fine for trying the app out.
 
 ## Build
 
@@ -83,7 +87,9 @@ sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew assembleDebug testDebugUnitTest
 ```
 
-The APK lands in `app/build/outputs/apk/debug/`. The Gradle wrapper fetches Gradle 9.8.1 and checks
+The APK lands in `app/build/outputs/apk/debug/`. For a minified release build (about 1.8 MB),
+run `./gradlew assembleRelease` and sign `app/build/outputs/apk/release/app-release-unsigned.apk`
+with your own key using `apksigner`. The Gradle wrapper fetches Gradle 9.8.1 and checks
 its SHA-256. Every plugin and library version is pinned in
 [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
 
