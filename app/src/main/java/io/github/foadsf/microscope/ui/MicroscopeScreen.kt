@@ -1,0 +1,612 @@
+package io.github.foadsf.microscope.ui
+
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.foadsf.microscope.MicroscopeViewModel
+import io.github.foadsf.microscope.TorchMode
+import io.github.foadsf.microscope.UiState
+import io.github.foadsf.microscope.gl.Filter
+import io.github.foadsf.microscope.gl.PreviewView
+import io.github.foadsf.microscope.gl.RenderParams
+import io.github.foadsf.microscope.imaging.CaptureMode
+import io.github.foadsf.microscope.imaging.Optics
+import kotlinx.coroutines.delay
+import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.pow
+
+@Composable
+fun MicroscopeScreen(vm: MicroscopeViewModel, onRequestPermission: () -> Unit) {
+    val s by vm.ui.collectAsStateWithLifecycle()
+    Box(Modifier.fillMaxSize().background(Palette.Background)) {
+        when {
+            s.fatal != null -> Message(s.fatal!!)
+            !s.hasPermission -> PermissionPrompt(onRequestPermission)
+            else -> Column(Modifier.fillMaxSize()) {
+                // The live view keeps the sensor's exact aspect ratio (so what is seen is what is
+                // captured) and takes whatever height the controls leave.
+                Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black), contentAlignment = Alignment.Center) {
+                    Viewfinder(s, vm)
+                }
+                Controls(s, vm)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Live view
+// ---------------------------------------------------------------------------------------------
+
+@Composable
+private fun Viewfinder(s: UiState, vm: MicroscopeViewModel) {
+    val g = s.geometry
+    val aspect = g?.uprightAspect ?: 0.75f
+    var tap by remember { mutableStateOf<Offset?>(null) }
+    val busy = s.processing != null
+
+    Box(
+        Modifier
+            .aspectRatio(aspect)
+            .background(Color.Black)
+            .pointerInput(busy) {
+                if (busy) return@pointerInput
+                detectTransformGestures { _, pan, zoom, _ ->
+                    if (zoom != 1f) vm.setZoom(vm.ui.value.zoom * zoom)
+                    if (pan != Offset.Zero) vm.pan(pan.x / size.width, pan.y / size.height)
+                }
+            }
+            .pointerInput(busy) {
+                if (busy) return@pointerInput
+                detectTapGestures(
+                    onTap = { o ->
+                        tap = o
+                        vm.focusAt(o.x / size.width, o.y / size.height)
+                    },
+                    onDoubleTap = { vm.resetView() },
+                )
+            },
+    ) {
+        CameraSurface(s, vm)
+        Overlay(s)
+        tap?.let { FocusReticle(it) { tap = null } }
+        TopBar(s, vm)
+        NotePill(s, vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
+    }
+}
+
+@Composable
+private fun CameraSurface(s: UiState, vm: MicroscopeViewModel) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var view by remember { mutableStateOf<PreviewView?>(null) }
+    AndroidView(
+        factory = { ctx -> PreviewView(ctx) { st -> vm.onTexture(st) }.also { view = it } },
+        modifier = Modifier.fillMaxSize(),
+        update = { v ->
+            val g = s.geometry ?: return@AndroidView
+            val preview = s.streams?.previewSize ?: return@AndroidView
+            v.renderer.update(
+                RenderParams(
+                    rotation = g.lens.sensorOrientation,
+                    glZoom = g.glZoom,
+                    bufferWidth = preview.width,
+                    bufferHeight = preview.height,
+                    filter = s.filter,
+                    peaking = s.peaking,
+                ),
+            )
+        },
+    )
+    DisposableEffect(lifecycle, view) {
+        val v = view
+        val observer = LifecycleEventObserver { _, e ->
+            when (e) {
+                Lifecycle.Event.ON_RESUME -> v?.onResume()
+                Lifecycle.Event.ON_PAUSE -> v?.onPause()
+                else -> Unit
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+}
+
+/** Centre mark and an approximate scale bar. */
+@Composable
+private fun Overlay(s: UiState) {
+    val measurer = rememberTextMeasurer()
+    val fov = s.fieldOfViewUm
+    Canvas(Modifier.fillMaxSize()) {
+        val c = Offset(size.width / 2, size.height / 2)
+        val mark = Color(0x66FFFFFF)
+        val r = 9.dp.toPx()
+        drawLine(mark, c.copy(x = c.x - r), c.copy(x = c.x + r), 1.dp.toPx())
+        drawLine(mark, c.copy(y = c.y - r), c.copy(y = c.y + r), 1.dp.toPx())
+
+        if (fov != null && fov.isFinite() && fov > 0f) {
+            val umPerPx = fov / size.width
+            val length = Optics.niceFloor(0.28f * size.width * umPerPx)
+            val px = length / umPerPx
+            val label = measurer.measure("≈ " + Optics.formatLength(length), Type.Value.copy(fontSize = 12.sp))
+            val pad = 8.dp.toPx()
+            val x0 = 16.dp.toPx() + pad
+            val y0 = size.height - 14.dp.toPx() - pad
+            val tick = 5.dp.toPx()
+            val stroke = 2.dp.toPx()
+            // A dark backing so the bar reads on bright and dark specimens alike.
+            drawRoundRect(
+                Palette.Scrim,
+                topLeft = Offset(x0 - pad, y0 - tick - 6.dp.toPx() - label.size.height - pad / 2),
+                size = Size(max(px, label.size.width.toFloat()) + 2 * pad, label.size.height + tick * 2 + 6.dp.toPx() + pad * 1.5f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(pad, pad),
+            )
+            drawLine(Palette.Text, Offset(x0, y0), Offset(x0 + px, y0), stroke, StrokeCap.Round)
+            drawLine(Palette.Text, Offset(x0, y0 - tick), Offset(x0, y0 + tick), stroke)
+            drawLine(Palette.Text, Offset(x0 + px, y0 - tick), Offset(x0 + px, y0 + tick), stroke)
+            drawText(label, topLeft = Offset(x0, y0 - tick - 4.dp.toPx() - label.size.height))
+        }
+    }
+}
+
+@Composable
+private fun FocusReticle(at: Offset, onDone: () -> Unit) {
+    val anim = remember(at) { Animatable(1.6f) }
+    val alpha = remember(at) { Animatable(1f) }
+    LaunchedEffect(at) {
+        anim.animateTo(1f, tween(220))
+        delay(700)
+        alpha.animateTo(0f, tween(300))
+        onDone()
+    }
+    Canvas(Modifier.fillMaxSize()) {
+        val r = 30.dp.toPx() * anim.value
+        drawCircle(Palette.Accent.copy(alpha = alpha.value), r, at, style = Stroke(1.5.dp.toPx()))
+    }
+}
+
+@Composable
+private fun BoxScope.TopBar(s: UiState, vm: MicroscopeViewModel) {
+    Row(
+        Modifier.align(Alignment.TopStart).fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Readout(s)
+        Spacer(Modifier.weight(1f))
+        val lens = s.lens
+        if (lens != null && lens.apertures.size > 1) {
+            Chip(text = "f/" + "%.1f".format(s.aperture ?: lens.apertures.last()), active = false, description = "Aperture") { vm.cycleAperture() }
+            Spacer(Modifier.width(8.dp))
+        }
+        if (lens?.hasFlash == true) {
+            RoundIcon(
+                active = s.torchOn,
+                badge = if (s.torchMode == TorchMode.AUTO) "A" else null,
+                description = "Torch ${s.torchMode.name.lowercase()}",
+                onClick = vm::cycleTorch,
+            ) { drawBolt(it, s.torchMode != TorchMode.OFF) }
+            Spacer(Modifier.width(8.dp))
+        }
+        RoundIcon(active = s.filter != Filter.COLOUR, badge = null, description = "Filter ${s.filter.label}", onClick = vm::cycleFilter) {
+            drawFilter(it, s.filter)
+        }
+        Spacer(Modifier.width(8.dp))
+        RoundIcon(active = s.peaking, badge = null, description = "Focus peaking", onClick = vm::togglePeaking) { drawPeaking(it) }
+    }
+}
+
+@Composable
+private fun Readout(s: UiState) {
+    val lens = s.lens ?: return
+    val parts = ArrayList<String>()
+    if (lens.manualFocus && lens.focusIsMetric && s.effectiveFocus > 0.05f) {
+        parts += "WD ≈ " + "%.0f".format(Optics.distanceMm(s.effectiveFocus)) + " mm"
+    }
+    s.fieldOfViewUm?.let { parts += "FOV ≈ " + Optics.formatLength(Optics.niceRound(it)) }
+    if (parts.isEmpty()) parts += lens.label
+    Text(
+        parts.joinToString("  ·  "),
+        style = Type.Value.copy(fontSize = 12.sp),
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(Palette.Scrim).padding(horizontal = 12.dp, vertical = 7.dp),
+    )
+}
+
+@Composable
+private fun NotePill(s: UiState, vm: MicroscopeViewModel, modifier: Modifier) {
+    val note = s.note
+    LaunchedEffect(note?.id) {
+        if (note != null) {
+            delay(2600)
+            vm.clearNote(note.id)
+        }
+    }
+    AnimatedVisibility(note != null, modifier = modifier, enter = fadeIn(), exit = fadeOut()) {
+        Text(
+            note?.text ?: "",
+            style = Type.Value,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(50)).background(Palette.Scrim)
+                .padding(horizontal = 16.dp, vertical = 9.dp),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------------------------
+
+@Composable
+private fun Controls(s: UiState, vm: MicroscopeViewModel) {
+    val busy = s.processing != null
+    Column(
+        Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        FocusControl(s, vm, enabled = !busy)
+        ZoomControl(s, vm, enabled = !busy)
+        Spacer(Modifier.height(2.dp))
+        ModeTabs(s, vm, enabled = !busy)
+        Spacer(Modifier.height(6.dp))
+        ShutterRow(s, vm)
+    }
+}
+
+@Composable
+private fun FocusControl(s: UiState, vm: MicroscopeViewModel, enabled: Boolean) {
+    val lens = s.lens
+    val max = lens?.minFocusDiopters ?: 0f
+    val usable = lens?.manualFocus == true && max > 0f
+    val value = when {
+        lens == null -> ""
+        !usable -> "fixed"
+        lens.focusIsMetric -> if (s.focus > 0.05f) "%.0f mm".format(Optics.distanceMm(s.focus)) else "∞"
+        else -> "%.0f %%".format(100 * s.focus / max)
+    }
+    SliderRow(
+        lead = {
+            if (lens?.afAuto == true) {
+                Chip("AF", active = false, description = "Autofocus at the centre", enabled = enabled) { vm.focusAt(0.5f, 0.5f) }
+            } else {
+                Text("FOCUS", style = Type.Label)
+            }
+        },
+        value = value,
+    ) {
+        // Left is far, right is near: the microscope end of the range is under the thumb.
+        Slider(
+            value = s.focus.coerceIn(0f, max(max, 0.01f)),
+            onValueChange = vm::setFocus,
+            valueRange = 0f..max(max, 0.01f),
+            enabled = enabled && usable,
+            colors = sliderColors(),
+            modifier = Modifier.semantics { contentDescription = "Focus, far to near" },
+        )
+    }
+}
+
+@Composable
+private fun ZoomControl(s: UiState, vm: MicroscopeViewModel, enabled: Boolean) {
+    val maxZ = MicroscopeViewModel.MAX_ZOOM
+    val digital = s.geometry?.let { it.glZoom > 1.01f } == true
+    SliderRow(
+        lead = { Text("ZOOM", style = Type.Label) },
+        value = "%.1f×".format(s.zoom),
+        valueColor = if (digital) Palette.Warn else Palette.Text,
+    ) {
+        // Logarithmic: equal slider travel per doubling.
+        Slider(
+            value = (ln(s.zoom) / ln(maxZ)).coerceIn(0f, 1f),
+            onValueChange = { vm.setZoom(maxZ.pow(it)) },
+            enabled = enabled,
+            colors = sliderColors(),
+            modifier = Modifier.semantics { contentDescription = "Zoom" },
+        )
+    }
+}
+
+@Composable
+private fun SliderRow(
+    lead: @Composable () -> Unit,
+    value: String,
+    valueColor: Color = Palette.Text,
+    slider: @Composable () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(58.dp), contentAlignment = Alignment.CenterStart) { lead() }
+        Box(Modifier.weight(1f).padding(horizontal = 6.dp)) { slider() }
+        Text(value, style = Type.Value.copy(color = valueColor), textAlign = TextAlign.End, modifier = Modifier.width(62.dp))
+    }
+}
+
+@Composable
+private fun ModeTabs(s: UiState, vm: MicroscopeViewModel, enabled: Boolean) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(horizontalArrangement = Arrangement.spacedBy(26.dp)) {
+            for ((mode, name) in listOf(CaptureMode.PHOTO to "PHOTO", CaptureMode.SUPER_RES to "SUPER-RES", CaptureMode.FOCUS_STACK to "STACK")) {
+                val selected = s.mode == mode
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = enabled, role = Role.Tab) { vm.setMode(mode) }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                ) {
+                    Text(name, style = Type.Tab.copy(color = if (selected) Palette.Accent else Palette.TextDim))
+                    Spacer(Modifier.height(4.dp))
+                    Box(Modifier.size(4.dp).clip(CircleShape).background(if (selected) Palette.Accent else Color.Transparent))
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        val caption = s.processing?.label ?: modeCaption(s, vm)
+        Text(
+            caption,
+            style = Type.Small.copy(color = if (s.processing != null) Palette.Accent else Palette.TextDim),
+            modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                .clickable(enabled = enabled && s.mode != CaptureMode.PHOTO) { vm.cycleFrames() }
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
+    }
+}
+
+private fun modeCaption(s: UiState, vm: MicroscopeViewModel): String = when (s.mode) {
+    CaptureMode.PHOTO -> "One frame, as the sensor sees it"
+    CaptureMode.SUPER_RES -> {
+        val roi = s.geometry?.let { g -> s.streams?.let { g.captureRoi(it.captureSize) } }
+        val scale = roi?.let { io.github.foadsf.microscope.imaging.Pipeline.superResScale(it.width() * it.height()) } ?: 2
+        "${s.burstFrames} frames · ${if (scale == 2) "2× resolution" else "denoise"}  ⟳"
+    }
+    CaptureMode.FOCUS_STACK -> {
+        val plan = vm.stackPlan(s)
+        val lens = s.lens
+        val depth = if (lens != null && lens.focusIsMetric && plan.size > 1 && plan.last() > 0.05f) {
+            " · ≈ %.1f mm deep".format(Optics.distanceMm(plan.last()) - Optics.distanceMm(plan.first()))
+        } else {
+            ""
+        }
+        "${s.stackFrames} slices$depth  ⟳"
+    }
+}
+
+@Composable
+private fun ShutterRow(s: UiState, vm: MicroscopeViewModel) {
+    val context = LocalContext.current
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        // Last capture
+        Box(
+            Modifier.size(52.dp).clip(CircleShape).background(Palette.SurfaceHigh).border(1.dp, Palette.Outline, CircleShape)
+                .clickable(enabled = s.lastUri != null) {
+                    val uri: Uri = s.lastUri ?: return@clickable
+                    val view = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    runCatching { context.startActivity(view) }
+                }
+                .semantics { contentDescription = "Open last capture" },
+        ) {
+            s.thumbnail?.let {
+                Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            }
+        }
+        Shutter(s, vm)
+        // Lens
+        val lens = s.lens
+        Box(
+            Modifier.size(52.dp).clip(CircleShape).background(Palette.SurfaceHigh).border(1.dp, Palette.Outline, CircleShape)
+                .clickable(enabled = s.lenses.size > 1 && s.processing == null) { vm.nextLens() }
+                .semantics { contentDescription = "Switch lens, now ${lens?.label}" },
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(lens?.equivalentMm?.takeIf { it > 0 }?.toString() ?: "–", style = Type.Value.copy(fontWeight = FontWeight.Bold))
+                Text("mm", style = Type.Small.copy(fontSize = 9.sp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun Shutter(s: UiState, vm: MicroscopeViewModel) {
+    val p = s.processing
+    val progress by animateFloatAsState(p?.progress ?: 0f, label = "progress")
+    val ready = s.streams != null && p == null
+    Box(
+        Modifier.size(78.dp).clip(CircleShape).clickable(enabled = ready, role = Role.Button) { vm.shutter() }
+            .semantics { contentDescription = "Capture" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 3.dp.toPx()
+            drawCircle(Palette.Text.copy(alpha = if (ready || p != null) 1f else 0.3f), size.minDimension / 2 - stroke / 2, style = Stroke(stroke))
+            if (p != null) {
+                drawArc(
+                    Palette.Accent, -90f, 360f * progress, false,
+                    topLeft = Offset(stroke / 2, stroke / 2), size = Size(size.width - stroke, size.height - stroke),
+                    style = Stroke(stroke, cap = StrokeCap.Round),
+                )
+            }
+            val inner = size.minDimension / 2 - 8.dp.toPx()
+            drawCircle(if (p != null) Palette.AccentDim else if (ready) Palette.Text else Palette.Outline, inner)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Small parts
+// ---------------------------------------------------------------------------------------------
+
+@Composable
+private fun sliderColors() = SliderDefaults.colors(
+    thumbColor = Palette.Text,
+    activeTrackColor = Palette.Accent,
+    inactiveTrackColor = Palette.Outline,
+    disabledThumbColor = Palette.Outline,
+    disabledActiveTrackColor = Palette.Outline,
+    disabledInactiveTrackColor = Palette.SurfaceHigh,
+)
+
+@Composable
+private fun Chip(text: String, active: Boolean, description: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Text(
+        text,
+        style = Type.Value.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = if (active) Palette.Background else Palette.Text),
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (active) Palette.Accent else Palette.Scrim)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = description }
+            .padding(horizontal = 11.dp, vertical = 7.dp),
+    )
+}
+
+@Composable
+private fun RoundIcon(active: Boolean, badge: String?, description: String, onClick: () -> Unit, draw: DrawScope.(Color) -> Unit) {
+    val tint = if (active) Palette.Background else Palette.Text
+    Box(
+        Modifier.size(38.dp).clip(CircleShape).background(if (active) Palette.Accent else Palette.Scrim)
+            .clickable(role = Role.Button, onClick = onClick).semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(18.dp)) { draw(tint) }
+        if (badge != null) {
+            Text(badge, style = Type.Small.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = tint),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 7.dp, bottom = 5.dp))
+        }
+    }
+}
+
+private fun DrawScope.drawBolt(c: Color, filled: Boolean) {
+    val w = size.width
+    val h = size.height
+    val p = Path().apply {
+        moveTo(w * 0.58f, 0f); lineTo(w * 0.12f, h * 0.58f); lineTo(w * 0.48f, h * 0.58f)
+        lineTo(w * 0.40f, h); lineTo(w * 0.88f, h * 0.40f); lineTo(w * 0.52f, h * 0.40f); close()
+    }
+    if (filled) drawPath(p, c) else drawPath(p, c, style = Stroke(1.5.dp.toPx()))
+}
+
+private fun DrawScope.drawFilter(c: Color, f: Filter) {
+    val r = size.minDimension / 2
+    drawCircle(c, r - 1.dp.toPx(), style = Stroke(1.5.dp.toPx()))
+    when (f) {
+        Filter.COLOUR -> drawArc(c, 90f, 180f, true, topLeft = Offset(1.dp.toPx(), 1.dp.toPx()), size = Size(size.width - 2.dp.toPx(), size.height - 2.dp.toPx()))
+        Filter.MONO -> drawCircle(c, r * 0.45f)
+        Filter.EDGES -> drawCircle(c, r * 0.45f, style = Stroke(1.5.dp.toPx()))
+    }
+}
+
+private fun DrawScope.drawPeaking(c: Color) {
+    val w = size.width
+    val h = size.height
+    val k = w * 0.3f
+    val st = 1.6.dp.toPx()
+    for ((x, y, dx, dy) in listOf(listOf(0f, 0f, 1f, 1f), listOf(w, 0f, -1f, 1f), listOf(0f, h, 1f, -1f), listOf(w, h, -1f, -1f))) {
+        drawLine(c, Offset(x, y), Offset(x + dx * k, y), st, StrokeCap.Round)
+        drawLine(c, Offset(x, y), Offset(x, y + dy * k), st, StrokeCap.Round)
+    }
+    drawCircle(c, w * 0.12f, Offset(w / 2, h / 2))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Other screens
+// ---------------------------------------------------------------------------------------------
+
+@Composable
+private fun PermissionPrompt(onRequest: () -> Unit) {
+    val context = LocalContext.current
+    Column(
+        Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Microscope", style = Type.Value.copy(fontSize = 26.sp, fontWeight = FontWeight.SemiBold))
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Turns your phone's cameras into a close-up inspection tool. It needs the camera; nothing leaves your phone.",
+            style = Type.Small.copy(fontSize = 14.sp), textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(28.dp))
+        Chip("Allow camera", active = true, description = "Allow camera") { onRequest() }
+        Spacer(Modifier.height(14.dp))
+        Text(
+            "Open app settings",
+            style = Type.Small,
+            modifier = Modifier.clickable {
+                context.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)),
+                )
+            }.padding(8.dp),
+        )
+    }
+}
+
+@Composable
+private fun Message(text: String) {
+    Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+        Text(text, style = Type.Value, textAlign = TextAlign.Center)
+    }
+}

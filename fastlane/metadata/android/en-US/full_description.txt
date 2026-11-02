@@ -1,0 +1,16 @@
+Microscope turns your phone's rear cameras into a close-up inspection tool.
+
+<ul>
+<li><b>Manual focus</b> in millimetres where the phone reports it, plus tap-to-focus</li>
+<li><b>Focus peaking</b> and colour, mono or edge (dark-field-like) live views on the GPU</li>
+<li><b>Zoom up to 16×</b>, cropped on the sensor first so zoomed views keep real detail</li>
+<li><b>Super-resolution</b>: a handheld burst registered to sub-pixel accuracy and merged onto a 2× finer grid</li>
+<li><b>Focus stacking</b>: a bracket of 5, 9 or 15 slices fused into one all-in-focus picture</li>
+<li><b>Every lens the phone exposes</b>, ranked by how much detail it can resolve close up</li>
+<li><b>Torch</b> off, on or automatic; aperture control on dual-aperture phones</li>
+<li>An approximate <b>scale bar</b>, and the scale saved in the picture's EXIF</li>
+</ul>
+
+One permission: the camera. No network access, no analytics, no ads.
+
+Scale readouts come from lens optics and the focus distance the camera reports, so they are approximate. Calibrate against a ruler or stage micrometer for measurements.

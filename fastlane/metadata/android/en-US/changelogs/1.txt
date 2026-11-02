@@ -1,0 +1,1 @@
+First release: live view with focus peaking, manual and tap focus, zoom, torch, super-resolution and focus-stacking captures.
