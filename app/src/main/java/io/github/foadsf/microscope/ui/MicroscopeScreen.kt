@@ -1,5 +1,7 @@
 package io.github.foadsf.microscope.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -26,13 +28,16 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -62,12 +67,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -93,6 +100,7 @@ fun MicroscopeScreen(vm: MicroscopeViewModel, onRequestPermission: () -> Unit) {
             s.fatal != null -> Message(s.fatal!!)
             !s.hasPermission -> PermissionPrompt(onRequestPermission)
             else -> Column(Modifier.fillMaxSize()) {
+                if (s.showInfo) InfoDialog(vm)
                 // The live view keeps the sensor's exact aspect ratio (so what is seen is what is
                 // captured) and takes whatever height the controls leave.
                 Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black), contentAlignment = Alignment.Center) {
@@ -141,6 +149,7 @@ private fun Viewfinder(s: UiState, vm: MicroscopeViewModel) {
         Overlay(s)
         tap?.let { FocusReticle(it) { tap = null } }
         TopBar(s, vm)
+        TorchLevel(s, vm)
         NotePill(s, vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
     }
 }
@@ -159,6 +168,8 @@ private fun CameraSurface(s: UiState, vm: MicroscopeViewModel) {
                 RenderParams(
                     rotation = g.lens.sensorOrientation,
                     glZoom = g.glZoom,
+                    offsetX = g.glOffsetX,
+                    offsetY = g.glOffsetY,
                     bufferWidth = preview.width,
                     bufferHeight = preview.height,
                     filter = s.filter,
@@ -240,7 +251,7 @@ private fun BoxScope.TopBar(s: UiState, vm: MicroscopeViewModel) {
         Modifier.align(Alignment.TopStart).fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Readout(s)
+        Readout(s) { vm.showInfo(true) }
         Spacer(Modifier.weight(1f))
         val lens = s.lens
         if (lens != null && lens.apertures.size > 1) {
@@ -265,7 +276,7 @@ private fun BoxScope.TopBar(s: UiState, vm: MicroscopeViewModel) {
 }
 
 @Composable
-private fun Readout(s: UiState) {
+private fun Readout(s: UiState, onClick: () -> Unit) {
     val lens = s.lens ?: return
     val parts = ArrayList<String>()
     if (lens.manualFocus && lens.focusIsMetric && s.effectiveFocus > 0.05f) {
@@ -274,9 +285,12 @@ private fun Readout(s: UiState) {
     s.fieldOfViewUm?.let { parts += "FOV ≈ " + Optics.formatLength(Optics.niceRound(it)) }
     if (parts.isEmpty()) parts += lens.label
     Text(
-        parts.joinToString("  ·  "),
+        parts.joinToString("  ·  ") + "  ⓘ",
         style = Type.Value.copy(fontSize = 12.sp),
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(Palette.Scrim).padding(horizontal = 12.dp, vertical = 7.dp),
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(Palette.Scrim)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Camera details" }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
     )
 }
 
@@ -569,6 +583,60 @@ private fun DrawScope.drawPeaking(c: Color) {
         drawLine(c, Offset(x, y), Offset(x, y + dy * k), st, StrokeCap.Round)
     }
     drawCircle(c, w * 0.12f, Offset(w / 2, h / 2))
+}
+
+/** Torch brightness, shown only while the torch is on and the device can dim it in a session. */
+@Composable
+private fun BoxScope.TorchLevel(s: UiState, vm: MicroscopeViewModel) {
+    val lens = s.lens ?: return
+    if (!s.torchOn || lens.torchStrengthMax <= 1) return
+    Row(
+        Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 58.dp, end = 12.dp)
+            .clip(RoundedCornerShape(50)).background(Palette.Scrim).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Canvas(Modifier.size(14.dp)) { drawBolt(Palette.Text, true) }
+        Slider(
+            value = s.torchLevel.toFloat(),
+            onValueChange = { vm.setTorchLevel(Math.round(it)) },
+            valueRange = 1f..lens.torchStrengthMax.toFloat(),
+            colors = sliderColors(),
+            modifier = Modifier.width(160.dp).padding(start = 8.dp).semantics { contentDescription = "Torch brightness" },
+        )
+    }
+}
+
+/** Everything the app detected about the phone and its lenses, with a copy button for bug reports. */
+@Composable
+private fun InfoDialog(vm: MicroscopeViewModel) {
+    val context = LocalContext.current
+    val text = remember { vm.diagnostics() }
+    Dialog(onDismissRequest = { vm.showInfo(false) }) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(max = 560.dp).clip(RoundedCornerShape(20.dp)).background(Palette.Surface)
+                .border(1.dp, Palette.Outline, RoundedCornerShape(20.dp)).padding(20.dp),
+        ) {
+            Text("Camera details", style = Type.Value.copy(fontSize = 18.sp, fontWeight = FontWeight.SemiBold))
+            Spacer(Modifier.height(4.dp))
+            Text("Detected from this phone. Paste it into a bug report.", style = Type.Small)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text,
+                style = Type.Small.copy(fontSize = 11.sp, color = Palette.Text, fontFamily = FontFamily.Monospace, lineHeight = 15.sp),
+                modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Chip("Copy", active = false, description = "Copy camera details") {
+                    val cm = context.getSystemService(ClipboardManager::class.java)
+                    cm.setPrimaryClip(ClipData.newPlainText("Microscope camera details", text))
+                    vm.note("Copied")
+                }
+                Spacer(Modifier.width(10.dp))
+                Chip("Close", active = true, description = "Close") { vm.showInfo(false) }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import android.graphics.Rect
 import android.util.Size
 import io.github.foadsf.microscope.camera.Lens
 import io.github.foadsf.microscope.gl.PreviewRenderer
+import io.github.foadsf.microscope.imaging.ZoomSplit
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -14,13 +15,19 @@ import kotlin.math.roundToInt
  *  - upright: normalised position in the whole sensor image as the user sees it (rotated upright);
  *  - buffer: normalised position in the sensor's own orientation (active array, YUV buffers).
  * The view shows the upright region centred on (cx, cy) with half-size 0.5 / zoom.
+ *
+ * How zoom is split between the ISP crop and the GPU is [ZoomSplit].
  */
 class Geometry(val lens: Lens, val zoom: Float, val cx: Float, val cy: Float) {
     private val toBuffer = PreviewRenderer.uprightToBuffer(lens.sensorOrientation)
 
+    private val split = ZoomSplit(zoom, cx, cy, lens.maxDigitalZoom, lens.centerOnlyCrop)
+
     /** Part of the zoom done by the ISP (real detail), the rest is GPU magnification. */
-    val ispZoom = zoom.coerceIn(1f, max(1f, lens.maxDigitalZoom))
-    val glZoom = zoom / ispZoom
+    val ispZoom get() = split.ispZoom
+    val glZoom get() = split.glZoom
+    val glOffsetX get() = split.glOffsetX
+    val glOffsetY get() = split.glOffsetY
 
     /** Upright image width / height. */
     val uprightAspect: Float
@@ -37,7 +44,7 @@ class Geometry(val lens: Lens, val zoom: Float, val cx: Float, val cy: Float) {
     fun viewToUpright(vx: Float, vy: Float) = (cx + (vx - 0.5f) / zoom) to (cy + (vy - 0.5f) / zoom)
 
     /** The ISP crop (SCALER_CROP_REGION) for the preview. */
-    fun cropRegion(): Rect = toActive(cx, cy, 0.5f / ispZoom)
+    fun cropRegion(): Rect = toActive(split.cropCx, split.cropCy, 0.5f / ispZoom)
 
     /** A metering rectangle around a tap at view position (vx, vy). */
     fun meteringRegion(vx: Float, vy: Float): Rect {
@@ -84,10 +91,7 @@ class Geometry(val lens: Lens, val zoom: Float, val cx: Float, val cy: Float) {
     companion object {
         private const val MIN_ROI = 64
 
-        /** Keeps the centre where the ISP crop still fits inside the sensor. */
-        fun clampCentre(lens: Lens, zoom: Float, x: Float, y: Float): Pair<Float, Float> {
-            val half = 0.5f / zoom.coerceIn(1f, max(1f, lens.maxDigitalZoom))
-            return x.coerceIn(half, 1f - half) to y.coerceIn(half, 1f - half)
-        }
+        fun clampCentre(lens: Lens, zoom: Float, x: Float, y: Float): Pair<Float, Float> =
+            ZoomSplit.clampCentre(zoom, x, y, lens.maxDigitalZoom, lens.centerOnlyCrop)
     }
 }

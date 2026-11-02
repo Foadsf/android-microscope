@@ -47,6 +47,9 @@ data class UiState(
     val aperture: Float? = null,
     val torchMode: TorchMode = TorchMode.AUTO,
     val torchOn: Boolean = false,
+    /** Torch brightness step where the device supports it (see Lens.torchStrengthMax). */
+    val torchLevel: Int = 1,
+    val showInfo: Boolean = false,
     val filter: Filter = Filter.COLOUR,
     val peaking: Boolean = true,
     val mode: CaptureMode = CaptureMode.SUPER_RES,
@@ -160,6 +163,7 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                 cx = cx,
                 cy = cy,
                 torchOn = it.torchMode == TorchMode.ON,
+                torchLevel = lens.torchStrengthDefault.coerceIn(1, lens.torchStrengthMax),
             )
         }
         darkFrames = 0
@@ -228,6 +232,17 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
         darkFrames = 0
         pushControls()
     }
+
+    fun setTorchLevel(level: Int) {
+        val max = state.value.lens?.torchStrengthMax ?: return
+        state.update { it.copy(torchLevel = level.coerceIn(1, max)) }
+        pushControls()
+    }
+
+    fun showInfo(show: Boolean) = state.update { it.copy(showInfo = show) }
+
+    /** Plain-text report of the device and every lens the app found, for bug reports. */
+    fun diagnostics(): String = Diagnostics.report(getApplication(), state.value)
 
     fun cycleAperture() {
         val s = state.value
@@ -379,7 +394,7 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
     private fun pushControls() {
         val s = state.value
         val g = s.geometry ?: return
-        camera.setControls(MicroscopeCamera.Controls(s.focus, s.aperture, s.torchOn, g.cropRegion()))
+        camera.setControls(MicroscopeCamera.Controls(s.focus, s.aperture, s.torchOn, s.torchLevel, g.cropRegion()))
     }
 
     /** Opens or closes the camera to match permission, lifecycle, surface and lens. */

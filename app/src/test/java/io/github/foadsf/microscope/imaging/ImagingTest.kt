@@ -195,4 +195,27 @@ class ImagingTest {
         assertEquals(img.argb.toList(), img.rotated(90).rotated(270).argb.toList())
         assertEquals(0xFF808080.toInt(), ycbcrToArgb(128f, 128f, 128f))
     }
+
+    @Test
+    fun zoomSplitKeepsTheViewInsideTheIspCrop() {
+        val r = Random(7)
+        repeat(2000) {
+            val zoom = 1f + r.nextFloat() * 15f
+            val maxIsp = 1f + r.nextFloat() * 9f
+            val centerOnly = r.nextBoolean()
+            val (cx, cy) = ZoomSplit.clampCentre(zoom, r.nextFloat(), r.nextFloat(), maxIsp, centerOnly)
+            val z = ZoomSplit(zoom, cx, cy, maxIsp, centerOnly)
+            val view = 0.5f / zoom
+            val crop = 0.5f / z.ispZoom
+            assertTrue(z.ispZoom >= 1f && z.ispZoom <= maxOf(1f, maxIsp) + 1e-4f && z.ispZoom <= zoom + 1e-4f)
+            assertEquals(zoom, z.ispZoom * z.glZoom, 1e-3f)
+            // The visible region lies inside the crop, and the crop inside the sensor.
+            assertTrue(abs(cx - z.cropCx) + view <= crop + 1e-4f)
+            assertTrue(abs(cy - z.cropCy) + view <= crop + 1e-4f)
+            assertTrue(z.cropCx - crop >= -1e-4f && z.cropCx + crop <= 1f + 1e-4f)
+            // The GPU offset puts the view centre where it belongs inside the crop.
+            assertEquals(cx, z.cropCx + z.glOffsetX / z.ispZoom, 1e-5f)
+            if (centerOnly) assertEquals(0.5f, z.cropCx, 0f) else assertEquals(0f, z.glOffsetX, 0f)
+        }
+    }
 }

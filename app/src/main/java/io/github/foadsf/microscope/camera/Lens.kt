@@ -6,6 +6,7 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
+import android.os.Build
 import android.util.Size
 import io.github.foadsf.microscope.imaging.Optics
 import kotlin.math.abs
@@ -40,6 +41,14 @@ data class Lens(
     val edgeModes: List<Int>,
     val yuvSizes: List<Size>,
     val previewSizes: List<Size>,
+    val hardwareLevel: Int,
+    val capabilities: List<Int>,
+    /** The ISP can only crop around the sensor centre (all LEGACY devices, and some others). */
+    val centerOnlyCrop: Boolean,
+    /** Torch brightness steps usable inside a capture session (Android 15+); 1 means on/off only. */
+    val torchStrengthMax: Int,
+    val torchStrengthDefault: Int,
+    val oisModes: List<Int>,
 ) {
     val key get() = "$openId/${physicalId ?: ""}"
 
@@ -128,7 +137,25 @@ object LensCatalog {
             edgeModes = c.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toList().orEmpty(),
             yuvSizes = yuv,
             previewSizes = preview,
+            hardwareLevel = c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
+                ?: CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY,
+            capabilities = caps.toList(),
+            centerOnlyCrop = c.get(CameraCharacteristics.SCALER_CROPPING_TYPE) != CameraMetadata.SCALER_CROPPING_TYPE_FREEFORM,
+            torchStrengthMax = if (Build.VERSION.SDK_INT >= 35) c.get(CameraCharacteristics.FLASH_TORCH_STRENGTH_MAX_LEVEL) ?: 1 else 1,
+            torchStrengthDefault = if (Build.VERSION.SDK_INT >= 35) c.get(CameraCharacteristics.FLASH_TORCH_STRENGTH_DEFAULT_LEVEL) ?: 1 else 1,
+            oisModes = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty(),
         )
+    }
+
+    /**
+     * YUV sizes worth trying for the capture stream, best first: the four largest, then the
+     * largest few at or below preview size, which every hardware level guarantees alongside a
+     * preview stream.
+     */
+    fun captureCandidates(lens: Lens): List<Size> {
+        val all = matchingAspect(lens.yuvSizes, lens.activeArray)
+        val small = all.filter { it.width.toLong() * it.height <= 1920L * 1440 }
+        return (all.take(4) + small.take(3)).distinct()
     }
 
     /** Output sizes with the active array's aspect ratio, largest first. */

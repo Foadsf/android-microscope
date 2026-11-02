@@ -17,8 +17,11 @@ import javax.microedition.khronos.opengles.GL10
 data class RenderParams(
     /** Sensor orientation: tells which way round the preview buffer's width and height are. */
     val rotation: Int = 90,
-    /** Magnification on top of the ISP crop, about the centre of the view. */
+    /** Magnification on top of the ISP crop. */
     val glZoom: Float = 1f,
+    /** View centre relative to the crop centre, in crop-normalised units (non-zero only for centre-only crops). */
+    val offsetX: Float = 0f,
+    val offsetY: Float = 0f,
     /** Camera preview buffer size, as delivered (sensor orientation). */
     val bufferWidth: Int = 1440,
     val bufferHeight: Int = 1080,
@@ -175,7 +178,7 @@ class PreviewRenderer(
         )
 
         /**
-         * View uv → SurfaceTexture texture coordinates: GL zoom about the centre, flip to GL's
+         * View uv → SurfaceTexture texture coordinates: GL zoom and pan within the crop, flip to GL's
          * bottom-up st, then the producer's transform. For a camera stream that transform already
          * contains the sensor rotation (the camera service sets it on preview streams), so the
          * renderer must not rotate again; only the YUV capture path, which has no transform,
@@ -183,7 +186,7 @@ class PreviewRenderer(
          */
         fun viewToTexture(p: RenderParams, m: FloatArray): Affine {
             val z = p.glZoom.toDouble()
-            val zoom = Affine(a = 1 / z, c = 0.5 - 0.5 / z, e = 1 / z, f = 0.5 - 0.5 / z)
+            val zoom = Affine(a = 1 / z, c = 0.5 - 0.5 / z + p.offsetX, e = 1 / z, f = 0.5 - 0.5 / z + p.offsetY)
             val flip = Affine(e = -1.0, f = 1.0)
             val producer = Affine(
                 m[0].toDouble(), m[4].toDouble(), m[12].toDouble(),

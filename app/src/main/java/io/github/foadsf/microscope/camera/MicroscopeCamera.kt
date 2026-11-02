@@ -52,6 +52,8 @@ class MicroscopeCamera(context: Context) {
         val focusDiopters: Float,
         val aperture: Float?,
         val torch: Boolean,
+        /** Torch brightness, 1..Lens.torchStrengthMax; used only where the device supports it. */
+        val torchLevel: Int,
         /** SCALER_CROP_REGION for the preview (active-array coordinates), null for the full sensor. */
         val crop: Rect?,
     )
@@ -122,7 +124,7 @@ class MicroscopeCamera(context: Context) {
         val preview = previews.firstOrNull { it.width <= 1920 && it.height <= 1440 } ?: previews.last()
         // The largest YUV size is not guaranteed alongside a preview stream on every hardware
         // level, so walk down until the HAL accepts the pair.
-        for (yuv in LensCatalog.matchingAspect(lens.yuvSizes, lens.activeArray).take(8)) {
+        for (yuv in LensCatalog.captureCandidates(lens)) {
             texture.setDefaultBufferSize(preview.width, preview.height)
             val surface = Surface(texture)
             val ir = ImageReader.newInstance(yuv.width, yuv.height, ImageFormat.YUV_420_888, MAX_IMAGES)
@@ -306,6 +308,9 @@ class MicroscopeCamera(context: Context) {
         if (l.apertures.size > 1 && c.aperture != null) b.put(CaptureRequest.LENS_APERTURE, c.aperture)
         if (l.hasFlash) {
             b.put(CaptureRequest.FLASH_MODE, if (c.torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
+            if (c.torch && l.torchStrengthMax > 1 && Build.VERSION.SDK_INT >= 35) {
+                b.put(CaptureRequest.FLASH_STRENGTH_LEVEL, c.torchLevel.coerceIn(1, l.torchStrengthMax))
+            }
         }
         b.put(CaptureRequest.CONTROL_AE_LOCK, exposureLocked)
         b.put(CaptureRequest.CONTROL_AWB_LOCK, exposureLocked)
@@ -365,8 +370,11 @@ class MicroscopeCamera(context: Context) {
             try {
                 val supported = try {
                     dev.isSessionConfigurationSupported(config)
-                } catch (_: UnsupportedOperationException) {
-                    true // The HAL cannot answer; just try it.
+                } catch (e: Exception) {
+                    // Older and custom-ROM HALs may not implement the query (or fail at it);
+                    // creating the session is the real test.
+                    Log.i(TAG, "isSessionConfigurationSupported unavailable: ${e.message}")
+                    true
                 }
                 if (supported) dev.createCaptureSession(config)
                 else cont.resumeWithException(IllegalStateException("combination unsupported"))
