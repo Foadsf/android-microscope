@@ -64,16 +64,26 @@ beat every input frame.
 
 ## Install
 
-Build a release APK (below) and install it:
+Download `microscope-<version>.apk` from the [latest release](../../releases/latest) and open it
+on your phone, or install it from a computer:
 
 ```bash
-adb install -r microscope.apk
+adb install -r microscope-0.1.0.apk
 ```
 
-Prefer a release build for real use. Debug builds are debuggable, which makes Android run the
-pixel loops much slower: on the emulator, a 9-frame stack took 42 s in debug and 27 s in release.
+Releases are signed with this certificate. Check it before installing if you got the APK from
+anywhere else, e.g. with `apksigner verify --print-certs` or the AppVerifier app:
+
+```
+CN=Foad S. Farimani, O=io.github.foadsf.microscope
+SHA-256: 27:2D:66:4C:7B:D4:1A:9B:AB:C3:92:25:3F:E5:E8:2F:8E:48:C1:26:89:4D:A7:76:3F:A7:A2:83:7E:79:47:F9
+```
+
 CI also uploads `app-debug.apk` from every [build run](../../actions/workflows/build.yml) (under
-*Artifacts*), which is fine for trying the app out.
+*Artifacts*). It is fine for a quick look, but use a release for real work. Debug builds are
+debuggable, which makes Android run the pixel loops much slower: on the emulator, a 9-frame stack
+took 42 s in debug and 27 s in release. A debug build and a release are signed with different
+keys, so uninstall one before installing the other.
 
 ## Build
 
@@ -87,9 +97,8 @@ sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
 ANDROID_HOME=$HOME/Android/Sdk ./gradlew assembleDebug testDebugUnitTest
 ```
 
-The APK lands in `app/build/outputs/apk/debug/`. For a minified release build (about 1.8 MB),
-run `./gradlew assembleRelease` and sign `app/build/outputs/apk/release/app-release-unsigned.apk`
-with your own key using `apksigner`. The Gradle wrapper fetches Gradle 9.8.1 and checks
+The APK lands in `app/build/outputs/apk/debug/`. `./gradlew assembleRelease` makes a minified
+release (about 1.8 MB), unsigned unless you configure a key (see [Signing](#signing)). The Gradle wrapper fetches Gradle 9.8.1 and checks
 its SHA-256. Every plugin and library version is pinned in
 [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
 
@@ -100,6 +109,12 @@ To time each pipeline stage at phone-like frame sizes:
 ```
 
 ### Signing
+
+Release builds are signed only when you give Gradle a properties file with `storeFile`,
+`storePassword`, `keyAlias` and `keyPassword`: pass `-Pmicroscope.signing=/path/to/file`, or put a
+`keystore.properties` next to `settings.gradle.kts` (gitignored). Without one, `assembleRelease`
+produces `app-release-unsigned.apk`, which is what CI and F-Droid want. The release key itself
+lives outside the repository.
 
 Debug builds are signed with your machine's own `~/.android/debug.keystore`. To make builds from
 several machines update one installed copy, put a shared `debug.keystore` (alias

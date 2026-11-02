@@ -8,3 +8,6 @@ local.properties
 # Signing keys never go in this public repo. See README "Signing".
 *.keystore
 *.jks
+
+# Release signing configuration (passwords). See app/build.gradle.kts.
+keystore.properties

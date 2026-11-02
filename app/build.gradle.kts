@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -36,8 +38,26 @@ android {
         }
     }
 
+    // Release signing: point -Pmicroscope.signing=<file> (or a gitignored keystore.properties next
+    // to settings.gradle.kts) at a properties file with storeFile, storePassword, keyAlias and
+    // keyPassword. Without one, release builds stay unsigned, which is what CI and F-Droid want.
+    val signingFile = providers.gradleProperty("microscope.signing").orNull?.let(::file)
+        ?: rootProject.file("keystore.properties")
+    if (signingFile.exists()) {
+        val p = Properties().apply { signingFile.inputStream().use { load(it) } }
+        signingConfigs {
+            create("release") {
+                storeFile = file(p.getProperty("storeFile"))
+                storePassword = p.getProperty("storePassword")
+                keyAlias = p.getProperty("keyAlias")
+                keyPassword = p.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (signingFile.exists()) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
