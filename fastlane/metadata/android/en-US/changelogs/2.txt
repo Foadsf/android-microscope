@@ -1,0 +1,1 @@
+Exposure compensation with a zebra for clipped highlights. A measuring line, calibrated against a known length per lens. Captures wait for the phone to settle after the shutter press. Sharper edges in super-resolution. Panning now works on phones that can only crop around the sensor centre. A camera details screen for bug reports.

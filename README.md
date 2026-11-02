@@ -80,7 +80,7 @@ Download `microscope-<version>.apk` from the [latest release](../../releases/lat
 on your phone, or install it from a computer:
 
 ```bash
-adb install -r microscope-0.1.0.apk
+adb install -r microscope-0.2.0.apk
 ```
 
 Releases are signed with this certificate. Check it before installing if you got the APK from
