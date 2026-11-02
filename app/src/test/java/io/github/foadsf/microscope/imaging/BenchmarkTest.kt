@@ -35,6 +35,8 @@ class BenchmarkTest {
             val warps = time("align burst 8 @ ${w}x$h") { Pipeline.alignToFirst(burst) }
             val scale = Pipeline.superResScale(w * h)
             time("merge 8 @ ${w}x$h scale $scale") { SuperResolution.merge(burst, warps, scale, 0.5f) }
+            if (scale == 2) time("merge 8 @ ${w}x$h unsteered") { SuperResolution.merge(burst, warps, scale, 0.5f, steer = 0f) }
+            if (scale == 2) time("merge 8 @ ${w}x$h steered, warm") { SuperResolution.merge(burst, warps, scale, 0.5f) }
         }
     }
 }

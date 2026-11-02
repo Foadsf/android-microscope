@@ -5,6 +5,7 @@ import android.util.Size
 import io.github.foadsf.microscope.camera.Lens
 import io.github.foadsf.microscope.gl.PreviewRenderer
 import io.github.foadsf.microscope.imaging.ZoomSplit
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -40,6 +41,14 @@ class Geometry(val lens: Lens, val zoom: Float, val cx: Float, val cy: Float) {
     /** Active-array pixels across the upright image's width. */
     val uprightSensorWidth: Int
         get() = if (lens.sensorOrientation % 180 == 0) lens.activeArray.width() else lens.activeArray.height()
+
+    /** Active-array pixels down the upright image's height. */
+    val uprightSensorHeight: Int
+        get() = if (lens.sensorOrientation % 180 == 0) lens.activeArray.height() else lens.activeArray.width()
+
+    /** Length in sensor pixels of a segment between two view-normalised points. */
+    fun sensorLength(vx0: Float, vy0: Float, vx1: Float, vy1: Float): Float =
+        hypot((vx1 - vx0) * uprightSensorWidth / zoom, (vy1 - vy0) * uprightSensorHeight / zoom)
 
     fun viewToUpright(vx: Float, vy: Float) = (cx + (vx - 0.5f) / zoom) to (cy + (vy - 0.5f) / zoom)
 

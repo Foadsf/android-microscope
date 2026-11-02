@@ -27,6 +27,8 @@ data class RenderParams(
     val bufferHeight: Int = 1080,
     val filter: Filter = Filter.COLOUR,
     val peaking: Boolean = true,
+    /** Stripe pixels where any colour channel is clipped, so exposure can be set by eye. */
+    val zebra: Boolean = false,
     val sharpen: Float = 0.6f,
     val contrast: Float = 1.0f,
 )
@@ -35,7 +37,7 @@ enum class Filter(val label: String) { COLOUR("Colour"), MONO("Mono"), EDGES("Ed
 
 /**
  * Draws the camera stream from a `GL_TEXTURE_EXTERNAL_OES` texture with one fragment pass: unsharp
- * mask, contrast, Sobel focus peaking and the inspection filters. The GPU only does what must run
+ * mask, contrast, Sobel focus peaking, the inspection filters and a clipping zebra. The GPU only does what must run
  * per displayed frame; captures are processed on the CPU at full resolution.
  */
 class PreviewRenderer(
@@ -58,6 +60,7 @@ class PreviewRenderer(
     private var uStepY = 0
     private var uFilter = 0
     private var uPeak = 0
+    private var uZebra = 0
     private var uSharpen = 0
     private var uContrast = 0
 
@@ -81,6 +84,7 @@ class PreviewRenderer(
         uStepY = GLES30.glGetUniformLocation(program, "uStepY")
         uFilter = GLES30.glGetUniformLocation(program, "uFilter")
         uPeak = GLES30.glGetUniformLocation(program, "uPeak")
+        uZebra = GLES30.glGetUniformLocation(program, "uZebra")
         uSharpen = GLES30.glGetUniformLocation(program, "uSharpen")
         uContrast = GLES30.glGetUniformLocation(program, "uContrast")
         android.opengl.Matrix.setIdentityM(texMatrix, 0)
@@ -122,6 +126,7 @@ class PreviewRenderer(
         GLES30.glUniform2f(uStepY, (f.b * sy).toFloat(), (f.e * sy).toFloat())
         GLES30.glUniform1i(uFilter, p.filter.ordinal)
         GLES30.glUniform1i(uPeak, if (p.peaking) 1 else 0)
+        GLES30.glUniform1i(uZebra, if (p.zebra) 1 else 0)
         GLES30.glUniform1f(uSharpen, p.sharpen)
         GLES30.glUniform1f(uContrast, p.contrast)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
@@ -224,6 +229,7 @@ uniform vec2 uStepX;
 uniform vec2 uStepY;
 uniform int uFilter;
 uniform int uPeak;
+uniform int uZebra;
 uniform float uSharpen;
 uniform float uContrast;
 in vec2 vTex;
@@ -261,6 +267,11 @@ void main() {
     if (uPeak == 1) {
         float k = smoothstep(0.28, 0.55, g);
         col = mix(col, vec3(0.37, 0.92, 0.83), k * 0.85);
+    }
+    if (uZebra == 1 && max(c.r, max(c.g, c.b)) > 0.98) {
+        // Diagonal stripes in screen space, so they never look like specimen texture.
+        float stripe = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / 16.0));
+        col = mix(col, vec3(stripe), 0.8);
     }
     outColor = vec4(col, 1.0);
 }

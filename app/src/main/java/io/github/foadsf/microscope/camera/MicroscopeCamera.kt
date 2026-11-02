@@ -54,6 +54,8 @@ class MicroscopeCamera(context: Context) {
         val torch: Boolean,
         /** Torch brightness, 1..Lens.torchStrengthMax; used only where the device supports it. */
         val torchLevel: Int,
+        /** Exposure compensation in Lens.evStep units, within Lens.evRange. */
+        val ev: Int,
         /** SCALER_CROP_REGION for the preview (active-array coordinates), null for the full sensor. */
         val crop: Rect?,
     )
@@ -301,6 +303,7 @@ class MicroscopeCamera(context: Context) {
         val l = lens ?: return
         b.put(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         b.put(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+        if (l.evRange.first < l.evRange.last) b.put(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, c.ev.coerceIn(l.evRange))
         if (l.manualFocus && manualFocus) {
             b.put(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
             b.put(CaptureRequest.LENS_FOCUS_DISTANCE, focus.coerceIn(0f, l.minFocusDiopters))

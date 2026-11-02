@@ -218,4 +218,122 @@ class ImagingTest {
             if (centerOnly) assertEquals(0.5f, z.cropCx, 0f) else assertEquals(0f, z.glOffsetX, 0f)
         }
     }
+
+    @Test
+    fun steadyGateWaitsForTheJoltToDecay() {
+        // A tap impulse: 0.3 rad/s ringing at 12 Hz, decaying with a 60 ms time constant, plus tremor.
+        val threshold = 0.04f
+        val gate = SteadyGate(threshold, holdNs = 120_000_000L)
+        val r = Random(9)
+        var firedAt = -1L
+        var t = 0L
+        while (t < 2_000_000_000L && firedAt < 0) {
+            val s = t / 1e9
+            val ring = 0.3 * exp(-s / 0.06) * kotlin.math.cos(2 * Math.PI * 12 * s)
+            val tremor = r.nextGaussian() * 0.004
+            if (gate.offer(t, (ring + tremor).toFloat(), (tremor * 0.5).toFloat(), 0f)) firedAt = t
+            t += 5_000_000L // 200 Hz
+        }
+        // The envelope drops below the threshold at 60 ms * ln(0.3 / 0.04) ≈ 121 ms; then 120 ms of calm.
+        assertTrue("fired at ${firedAt / 1e6} ms", firedAt in 200_000_000L..330_000_000L)
+        // Constant shaking above the threshold never opens the gate.
+        val shaky = SteadyGate(threshold, 120_000_000L)
+        assertTrue((0 until 400).none { shaky.offer(it * 5_000_000L, 0.05f, 0f, 0f) })
+        // Note10-like main camera at 1/30 s: a 1.5 px budget is stricter than hand tremor, so the floor applies.
+        assertEquals(SteadyGate.MIN_RAD_S, SteadyGate.threshold(1.4f, 4.3f, 33_333_333L), 1e-6f)
+        // At 1/200 s the budget itself (1.5 * 1.4 µm / (4.3 mm * 5 ms) ≈ 0.098 rad/s) applies.
+        assertEquals(0.0977f, SteadyGate.threshold(1.4f, 4.3f, 5_000_000L), 1e-3f)
+    }
+
+    @Test
+    fun calibrationCorrectsTheLensModel() {
+        val model = { d: Float -> Optics.objectPixelUm(1.4f, 4.3f, Optics.distanceMm(d)) }
+        // No calibration: the model, marked approximate.
+        val bare = Scale.estimate(model, null, 12f)!!
+        assertEquals(model(12f), bare.umPerSensorPixel, 1e-4f)
+        assertTrue(!bare.calibrated)
+        // A ruler says the model is 8 % high at 12 D: exact there and calibrated.
+        val cal = Calibration(12f, model(12f) / 1.08f)
+        val at = Scale.estimate(model, cal, 12f)!!
+        assertEquals(cal.umPerSensorPixel, at.umPerSensorPixel, 1e-5f)
+        assertTrue(at.calibrated)
+        // Within 2 %: still calibrated, scaled by the model's ratio.
+        val near = Scale.estimate(model, cal, 12.2f)!!
+        assertTrue(near.calibrated)
+        assertEquals(model(12.2f) / 1.08f, near.umPerSensorPixel, 1e-4f)
+        // Far away: corrected, but approximate.
+        val far = Scale.estimate(model, cal, 8f)!!
+        assertTrue(!far.calibrated)
+        assertEquals(model(8f) / 1.08f, far.umPerSensorPixel, 1e-4f)
+        // A lens without metric focus: the calibration holds only at its own setting.
+        val c2 = Calibration(0.6f, 10f)
+        assertEquals(10f, Scale.estimate(null, c2, 0.6f)!!.umPerSensorPixel, 0f)
+        assertTrue(Scale.estimate(null, c2, 0.4f) == null)
+        assertTrue(Scale.estimate(null, null, 0.6f) == null)
+        // Stored form round-trips; junk is rejected.
+        assertEquals(cal, Calibration.decode(Calibration.encode(cal)))
+        assertTrue(Calibration.decode("x;1") == null && Calibration.decode("1;-2") == null && Calibration.decode(null) == null)
+    }
+
+    @Test
+    fun measuredLengthLabels() {
+        assertEquals("84.2 µm", Optics.formatMeasure(84.2f))
+        assertEquals("512 µm", Optics.formatMeasure(512.3f))
+        assertEquals("1.27 mm", Optics.formatMeasure(1270f))
+        assertEquals("12.4 mm", Optics.formatMeasure(12_400f))
+    }
+
+    @Test
+    fun kernelSteeringHelpsEdgesWithoutHurtingTexture() {
+        // Sharp-edged scene: discs and bars at random angles, values 50..210, 2x ground truth.
+        val r = Random(11)
+        val discs = Array(14) { doubleArrayOf(r.nextDouble() * 320, r.nextDouble() * 240, 8 + r.nextDouble() * 30, 50 + r.nextDouble() * 160) }
+        val bars = Array(10) { doubleArrayOf(r.nextDouble() * 320, r.nextDouble() * 240, r.nextDouble() * Math.PI, 2 + r.nextDouble() * 8, 50 + r.nextDouble() * 160) }
+        fun at(x: Double, y: Double): Double {
+            var v = 128.0
+            for (d in discs) if ((x - d[0]) * (x - d[0]) + (y - d[1]) * (y - d[1]) < d[2] * d[2]) v = d[3]
+            for (b in bars) if (abs(-(x - b[0]) * kotlin.math.sin(b[2]) + (y - b[1]) * kotlin.math.cos(b[2])) < b[3]) v = b[4]
+            return v
+        }
+        // Mean over a w x w square centred on (x, y), by 6x6 supersampling.
+        fun box(x: Double, y: Double, w: Double): Double {
+            var acc = 0.0
+            for (j in 0 until 6) for (i in 0 until 6) acc += at(x + ((i + 0.5) / 6 - 0.5) * w, y + ((j + 0.5) / 6 - 0.5) * w)
+            return acc / 36
+        }
+        val w = 160
+        val h = 120
+        val frames = (0 until 8).map { k ->
+            val dx = if (k == 0) 0.0 else r.nextDouble() * 2 - 1
+            val dy = if (k == 0) 0.0 else r.nextDouble() * 2 - 1
+            val p = Plane(w, h)
+            for (y in 0 until h) for (x in 0 until w) p.data[y * w + x] = (box(2 * (x + dx) + 0.5, 2 * (y + dy) + 0.5, 2.0) + r.nextGaussian() * 3).toFloat()
+            frameOf(p)
+        }
+        val truth = Plane(2 * w, 2 * h)
+        for (y in 0 until 2 * h) for (x in 0 until 2 * w) truth.data[y * 2 * w + x] = box(x.toDouble(), y.toDouble(), 1.0).toFloat()
+        val warps = Pipeline.alignToFirst(frames)
+        val steered = psnr(lumaOf(SuperResolution.merge(frames, warps, 2, 0f)), truth, 8)
+        val plain = psnr(lumaOf(SuperResolution.merge(frames, warps, 2, 0f, steer = 0f)), truth, 8)
+
+        // The band-limited texture of burstMergeBeatsSingleFrameUpscale: steering must not hurt it.
+        val sc = Scene(4, 1.1)
+        val rt = Random(5)
+        val boxed = { u: Double, v: Double -> 0.25 * (sc.at(u - 0.5, v - 0.5) + sc.at(u + 0.5, v - 0.5) + sc.at(u - 0.5, v + 0.5) + sc.at(u + 0.5, v + 0.5)) }
+        val tex = (0 until 8).map { k ->
+            val dx = if (k == 0) 0.0 else rt.nextDouble() * 2 - 1
+            val dy = if (k == 0) 0.0 else rt.nextDouble() * 2 - 1
+            val p = Plane(w, h)
+            for (y in 0 until h) for (x in 0 until w) p.data[y * w + x] = (boxed(2 * (x + dx) + 0.5, 2 * (y + dy) + 0.5) + rt.nextGaussian() * 3).toFloat()
+            frameOf(p)
+        }
+        val texTruth = Plane(2 * w, 2 * h)
+        for (y in 0 until 2 * h) for (x in 0 until 2 * w) texTruth.data[y * 2 * w + x] = boxed(x.toDouble(), y.toDouble()).toFloat()
+        val tw = Pipeline.alignToFirst(tex)
+        val texSteered = psnr(lumaOf(SuperResolution.merge(tex, tw, 2, 0f)), texTruth, 8)
+        val texPlain = psnr(lumaOf(SuperResolution.merge(tex, tw, 2, 0f, steer = 0f)), texTruth, 8)
+        println("edges: steered %.2f dB, isotropic %.2f dB; texture: steered %.2f dB, isotropic %.2f dB".format(steered, plain, texSteered, texPlain))
+        assertTrue("steering should sharpen edges: $steered vs $plain dB", steered > plain + 0.5)
+        assertTrue("steering must not cost texture: $texSteered vs $texPlain dB", texSteered > texPlain - 0.1)
+    }
 }

@@ -31,6 +31,11 @@ object SuperResolution {
     // Per kernel: Σw, Σw·dx, Σw·dy, Σw·dx², Σw·dx·dy, Σw·dy², Σw·v, Σw·v·dx, Σw·v·dy.
     private const val ACC = 9
     private const val NARROW = 1.2f // output pixels
+    // Kernel steering along edges (Wronski et al. 2019, "Handheld Multi-Frame Super-Resolution").
+    internal const val STEER = 1f
+    private const val STRETCH = 1.0f
+    private const val SHRINK = 0.35f
+    private const val NOISE_TRACE = 4f
 
     /** Wide kernel radius in output pixels: must reach the neighbouring input samples (1.5 px away at 2x). */
     private fun wideRadius(scale: Int) = scale.toFloat()
@@ -50,6 +55,7 @@ object SuperResolution {
         warps: List<Affine>,
         scale: Int,
         sharpen: Float,
+        steer: Float = STEER,
         progress: (Float) -> Unit = {},
     ): RgbImage {
         require(frames.isNotEmpty() && frames.size == warps.size)
@@ -70,7 +76,8 @@ object SuperResolution {
         if (scale == 1) {
             temporalMerge(frames, warps, refY, refGrad, tol0, outY) { progress(0.8f * it) }
         } else {
-            splatMerge(frames, warps, inverses, refY, refGrad, tol0, outY, scale, progress)
+            val shape = if (steer > 0f) steering(refY, sigma, steer, wideRadius(scale)) else null
+            splatMerge(frames, warps, inverses, refY, refGrad, tol0, outY, scale, progress, shape)
         }
 
         // Chroma: robust temporal average on a half-resolution output grid.
@@ -151,6 +158,7 @@ object SuperResolution {
     private fun splatMerge(
         frames: List<YuvFrame>, warps: List<Affine>, inverses: List<Affine>, refY: Plane, refGrad: Plane,
         tol0: Float, outY: Plane, scale: Int, progress: (Float) -> Unit,
+        shape: FloatArray?,
     ) {
         val w = refY.width
         val outW = outY.width
@@ -196,6 +204,21 @@ object SuperResolution {
                             val tol = tol0 + 0.25f * g * g
                             robust = 1f / (1f + d * d / tol)
                         }
+                        // Narrow kernel shape at the sample's reference position (see [steering]).
+                        var e1x = 1f
+                        var e1y = 0f
+                        var rAcross = NARROW
+                        var rAlong = NARROW
+                        if (shape != null) {
+                            val sx = (qx + 0.5f).toInt().coerceIn(0, w - 1)
+                            val sy = (qy + 0.5f).toInt().coerceIn(0, refY.height - 1)
+                            val k = 4 * (sy * w + sx)
+                            e1x = shape[k]
+                            e1y = shape[k + 1]
+                            rAcross = shape[k + 2]
+                            rAlong = shape[k + 3]
+                        }
+                        val steered = rAlong != NARROW || rAcross != NARROW
                         val ix0 = max(0, ceil(ox - radius).toInt())
                         val ix1 = min(outW - 1, floor(ox + radius).toInt())
                         val iy0 = max(oy0, ceil(oy - radius).toInt())
@@ -219,7 +242,14 @@ object SuperResolution {
                                 val dx = ox - ix
                                 val a = (o + ix) * ACC
                                 accumulate(acc, a, wt, dx, dy, value)
-                                val wn = kyn * kxn[j]
+                                val wn = if (steered) {
+                                    val u = (dx * e1x + dy * e1y) / rAcross
+                                    val v = (dy * e1x - dx * e1y) / rAlong
+                                    val r2 = u * u + v * v
+                                    if (r2 < 1f) (1f - r2) * (1f - r2) * robust else 0f
+                                } else {
+                                    kyn * kxn[j]
+                                }
                                 if (wn > 0f) accumulate(nar, a, wn, dx, dy, value)
                             }
                         }
@@ -307,6 +337,67 @@ object SuperResolution {
         val den = s0 - (sx * jx + sy * jy)
         if (den <= 1e-6 * s0) return mean
         return ((v0 - (sx * ix + sy * iy)) / den).toFloat()
+    }
+
+    /**
+     * Narrow-kernel shape for every reference pixel, as (e1x, e1y, r across, r along): from the
+     * smoothed structure tensor, the kernel is narrowed across an edge (along the gradient e1) and
+     * stretched along it, in proportion to the edge's coherence (λ1 − λ2)/(λ1 + λ2), discounted
+     * where the gradient is mostly noise. Flat or noisy areas keep the round kernel.
+     */
+    private fun steering(p: Plane, sigma: Float, steer: Float, maxRadius: Float): FloatArray {
+        val w = p.width
+        val h = p.height
+        val xx = Plane(w, h)
+        val xy = Plane(w, h)
+        val yy = Plane(w, h)
+        parallelFor(h) { y ->
+            val ym = max(0, y - 1)
+            val yp = min(h - 1, y + 1)
+            for (x in 0 until w) {
+                val gx = 0.5f * (p[min(w - 1, x + 1), y] - p[max(0, x - 1), y])
+                val gy = 0.5f * (p[x, yp] - p[x, ym])
+                val i = y * w + x
+                xx.data[i] = gx * gx
+                xy.data[i] = gx * gy
+                yy.data[i] = gy * gy
+            }
+        }
+        val jxx = blur(blur(xx)).data
+        val jxy = blur(blur(xy)).data
+        val jyy = blur(blur(yy)).data
+        val noise = NOISE_TRACE * sigma * sigma
+        val out = FloatArray(4 * w * h)
+        parallelFor(h) { y ->
+            for (x in 0 until w) {
+                val i = y * w + x
+                val a = jxx[i]
+                val b = jxy[i]
+                val c = jyy[i]
+                val tr = a + c
+                val root = sqrt((a - c) * (a - c) + 4f * b * b)
+                val o = 4 * i
+                // Eigenvector of the larger eigenvalue: (a − c + root, 2b), or the x axis if isotropic.
+                var ex = a - c + root
+                var ey = 2f * b
+                val n = sqrt(ex * ex + ey * ey)
+                if (tr <= 1e-6f || n <= 1e-12f) {
+                    out[o] = if (a >= c) 1f else 0f
+                    out[o + 1] = if (a >= c) 0f else 1f
+                    out[o + 2] = NARROW
+                    out[o + 3] = NARROW
+                    continue
+                }
+                ex /= n
+                ey /= n
+                val coherence = root / tr * (tr / (tr + noise)) * steer
+                out[o] = ex
+                out[o + 1] = ey
+                out[o + 2] = NARROW * (1f - SHRINK * coherence)
+                out[o + 3] = min(maxRadius, NARROW * (1f + STRETCH * coherence))
+            }
+        }
+        return out
     }
 
     private fun gradientMagnitude(p: Plane): Plane {

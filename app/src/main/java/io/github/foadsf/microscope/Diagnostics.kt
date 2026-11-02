@@ -19,7 +19,7 @@ object Diagnostics {
         appendLine("Build: ${Build.DISPLAY}")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) appendLine("SoC: ${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}")
         val heapMb = Runtime.getRuntime().maxMemory() / (1024 * 1024)
-        appendLine("Cores: ${Runtime.getRuntime().availableProcessors()}, heap limit $heapMb MB")
+        appendLine("Cores: ${Runtime.getRuntime().availableProcessors()}, heap limit $heapMb MB, gyroscope ${yes(SteadyHold.available(context))}")
         s.streams?.let { appendLine("Open: ${it.lens.label}, preview ${it.previewSize}, capture ${it.captureSize}") }
         appendLine()
         appendLine("Rear lenses (${s.lenses.size}), best for close-up first:")
@@ -47,7 +47,12 @@ object Diagnostics {
             else -> "torch on/off"
         }
         val yuv = l.yuvSizes.maxByOrNull { it.width.toLong() * it.height }
-        appendLine("  $torch, largest YUV $yuv")
+        val ev = if (l.evRange.first < l.evRange.last) {
+            "EV ${fmt(l.evRange.first * l.evStep, 1)}..${fmt(l.evRange.last * l.evStep, 1)}"
+        } else {
+            "no EV compensation"
+        }
+        appendLine("  $torch, $ev, largest YUV $yuv")
         if (l.closestObjectPixelUm.isFinite()) {
             appendLine("  at closest focus ≈ ${fmt(l.closestObjectPixelUm, 1)} µm per sensor pixel")
         }

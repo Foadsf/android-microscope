@@ -62,6 +62,14 @@ from one camera, with sub-pixel motion between them (super-resolution) or with d
     averages noise itself and sharpens once at the end.
   - Focus brackets move the lens with the preview stream, wait for `LENS_STATE` to report
     stationary at the target distance, and then expose with the ISP's high-quality processing.
+- **Exposure compensation** is `CONTROL_AE_EXPOSURE_COMPENSATION` within
+  `CONTROL_AE_COMPENSATION_RANGE`. It stays in force while AE is locked for a capture.
+- **Steady hold.** Pressing the shutter jolts the phone. Before capturing, the app waits (up to
+  1.5 s) until the gyroscope's angular speed has stayed for 120 ms below the speed that would move
+  the image 1.5 px during one exposure: `ω = 1.5 · pitch / (f · t)`. Rotation moves the image by
+  `ω·t·f / pitch` pixels whatever the working distance. The threshold never goes below 0.03 rad/s
+  (≈ 1.7°/s), or a handheld phone would rarely qualify, and the burst merge wants some tremor
+  anyway. Translation at macro distances also blurs, and a gyroscope cannot see it.
 - **Torch** is `FLASH_MODE_TORCH` in the repeating request. In auto, it turns on after about a second
   of a scene darker than EV₁₀₀ 5. It never turns itself off: once the torch lights the scene, the
   meter can no longer judge the ambient light.
@@ -77,7 +85,9 @@ does:
 - an unsharp mask against a 3×3 binomial blur, then contrast;
 - Sobel gradient magnitude of luma, for **focus peaking** (cyan) and for the **edge** filter, a
   dark-field-like rendering of relief and scratches;
-- mono.
+- mono;
+- while the exposure slider is open, a **zebra**: diagonal screen-space stripes where any colour
+  channel exceeds 0.98, so clipped highlights are visible while setting exposure.
 
 Neighbourhood taps are one preview-buffer pixel apart in the buffer's own orientation, so peaking
 behaves the same at every zoom.
@@ -117,6 +127,11 @@ position on the output grid:
     still burst) it interpolates about as well as bilinear.
   - Each pixel blends the two by the spread of the narrow kernel's sample positions, measured as
     the determinant of their weighted covariance.
+  - The narrow kernel is **steered** along edges (Wronski et al. 2019). It takes its shape from the
+    reference frame's smoothed structure tensor at the sample's position: narrowed across the edge
+    by up to 35 % and stretched along it by up to 100 % (capped at the wide radius), in proportion
+    to the coherence (λ₁ − λ₂)/(λ₁ + λ₂). The gradient energy must also exceed the noise, so flat
+    or noisy areas keep the round kernel. Shapes are computed once per reference pixel.
 
   Zeroth-order averaging cannot do both: a narrow kernel turns a still burst blocky, and a wide one
   blurs a moving burst. The unit test found exactly that before this design.
@@ -133,9 +148,14 @@ Test result on a band-limited synthetic scene, 8 frames, noise σ = 3:
 
 | Input | PSNR |
 |---|---|
-| Moving burst, merged | 34.1 dB |
+| Moving burst, merged | 34.5 dB |
 | Still burst, merged | 30.4 dB |
 | One frame, bilinear 2× | 30.2 dB |
+
+Steering, against the same merge with round kernels, adds about 1 dB on a sharp-edged scene
+(38.0 vs 37.0 dB) and 0.3 dB on the band-limited texture (35.4 vs 35.2 dB). Once the JIT has
+warmed up, it costs no measurable time on the desktop JVM. The test requires a gain on edges and
+no loss on texture.
 
 **Limits.** Phone YUV has been demosaiced, denoised and sharpened by the ISP. True multi-frame
 super-resolution (Wronski et al. 2019, on Pixel phones) merges RAW Bayer frames and also replaces
@@ -169,8 +189,20 @@ m = f / (u − f)                 lateral magnification, thin lens
 
 `u` comes from the reported focus distance, which is measured from the front of the lens, not from
 the principal plane, so this is first-order. The app labels every derived number "≈", and writes
-the scale into EXIF X/Y resolution in pixels per centimetre. Calibrate against a stage micrometer
-if you need real measurements.
+the scale into EXIF X/Y resolution in pixels per centimetre.
+
+**Calibration.** The user lays the measuring line across a known length. The app stores, per lens,
+the focus setting and the true µm per sensor pixel there (`Scale`, `Calibration`).
+
+- Within 2 % (+0.02 D) of that setting the stored scale is used and shown without "≈".
+- At other settings the thin-lens model is scaled by the ratio found at calibration. Most of the
+  model's error is a slowly varying offset in the reported distance, so this is better than the
+  bare model, but it is still marked "≈".
+- On lenses whose focus units are arbitrary there is no model, and the calibration holds only at
+  its own setting.
+
+Line lengths are measured in sensor pixels from view coordinates, so calibration does not depend
+on zoom or on screen size.
 
 ## References
 

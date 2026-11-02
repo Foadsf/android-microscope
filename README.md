@@ -6,6 +6,10 @@ modes that do more than one frame can.
 
 - **Live view on the GPU:** sharpening, focus peaking, and colour, mono or edge (dark-field-like)
   rendering, in one OpenGL ES 3 pass.
+- **Exposure compensation** with a zebra that stripes clipped highlights, for shiny metal and
+  solder.
+- **Measuring:** drag a line across the specimen to read its length. Calibrate once against a
+  ruler and readings at that focus are exact to the calibration, not ≈.
 - **Manual focus** in physical distance where the phone reports it, plus tap-to-focus that hands
   over to manual. The slider starts at the lens's closest focus.
 - **Zoom up to 16×.** The camera's ISP crops the sensor first, so zoomed views keep real detail;
@@ -19,6 +23,8 @@ modes that do more than one frame can.
   resolve at closest focus, and the best one opens first.
 - **Torch:** off, on, or auto (turns on when the scene is dark). The aperture switches too on
   phones that have a variable aperture, such as the Galaxy S9/S10/Note10 main cameras.
+- **Waits for the phone to settle** after you press the shutter (gyroscope), so the press itself
+  does not blur the picture.
 - **Saves JPEGs** to *Pictures/Microscope* with the scale in EXIF (X/Y resolution, in pixels per
   centimetre on the specimen) and a plain-text description of how each picture was made.
 
@@ -34,7 +40,8 @@ checked against, a Galaxy Note10 (SM-N970F).
    minimum focus distance nothing will be sharp.
 2. Tap the specimen to focus, then fine-tune with the slider. Cyan peaking marks what is in focus.
 3. Pinch or slide to zoom, and drag to pan. Double-tap resets the view.
-4. Pick a mode and press the shutter:
+4. If highlights are blown out, tap **EV** and lower it until the zebra stripes go.
+5. Pick a mode and press the shutter. The app waits up to 1.5 s for the phone to stop shaking:
    - **Photo:** one frame, instantly.
    - **Super-res:** hold the phone by hand. A rigid stand gives no sub-pixel motion, so the burst
      can only denoise. Tap the caption to change the frame count.
@@ -42,8 +49,13 @@ checked against, a Galaxy Note10 (SM-N970F).
 
 The scale bar and the "WD"/"FOV" readout come from thin-lens optics and the focus distance the
 camera reports. They are **approximate** (±10 % or worse), and are hidden on phones that report
-focus in arbitrary units. For measurements, photograph a ruler or stage micrometer at the same
-settings.
+focus in arbitrary units.
+
+To measure, tap the ruler button and drag the ends of the line. To calibrate, put a known length
+under the lens (steel-ruler divisions, a stage micrometer, IC pin pitch: 1.27 mm for SOIC), lay
+the line across it, tap **Calibrate** and enter the length. The calibration is kept per lens. It
+is exact at the focus setting where you made it (the "≈" disappears) and corrects the estimate at
+other settings. It also works on phones whose focus units are arbitrary, at that one setting.
 
 ## How it works
 
@@ -53,9 +65,9 @@ short:
 | Stage | Method |
 |---|---|
 | Registration | Coarse-to-fine Gaussian pyramid, exhaustive search at the top, then inverse-compositional Lucas-Kanade with a similarity warp (Baker & Matthews 2004) |
-| Super-resolution | Forward-mapped samples, two-scale first-order kernel regression (Takeda, Farsiu & Milanfar 2007), robust weights against motion |
+| Super-resolution | Forward-mapped samples, two-scale first-order kernel regression (Takeda, Farsiu & Milanfar 2007) with edge-steered kernels (Wronski et al. 2019), robust weights against motion |
 | Focus stacking | Laplacian-pyramid fusion (Burt & Adelson 1983) with energy-weighted coefficients, tiled across all cores |
-| Live view | OpenGL ES 3 external-texture shader: unsharp mask, Sobel peaking |
+| Live view | OpenGL ES 3 external-texture shader: unsharp mask, Sobel peaking, clipping zebra |
 
 The imaging code (`app/src/main/java/.../imaging`) is plain Kotlin with no Android dependencies.
 Its unit tests check each algorithm against ground truth on synthetic scenes. Super-resolution

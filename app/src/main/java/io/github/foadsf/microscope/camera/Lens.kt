@@ -49,6 +49,9 @@ data class Lens(
     val torchStrengthMax: Int,
     val torchStrengthDefault: Int,
     val oisModes: List<Int>,
+    /** Exposure compensation range in steps of [evStep] stops; 0..0 when the HAL has none. */
+    val evRange: IntRange,
+    val evStep: Float,
 ) {
     val key get() = "$openId/${physicalId ?: ""}"
 
@@ -144,6 +147,8 @@ object LensCatalog {
             torchStrengthMax = if (Build.VERSION.SDK_INT >= 35) c.get(CameraCharacteristics.FLASH_TORCH_STRENGTH_MAX_LEVEL) ?: 1 else 1,
             torchStrengthDefault = if (Build.VERSION.SDK_INT >= 35) c.get(CameraCharacteristics.FLASH_TORCH_STRENGTH_DEFAULT_LEVEL) ?: 1 else 1,
             oisModes = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty(),
+            evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)?.let { it.lower..it.upper } ?: 0..0,
+            evStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f,
         )
     }
 

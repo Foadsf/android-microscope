@@ -16,6 +16,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +41,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -69,6 +73,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -121,6 +126,7 @@ private fun Viewfinder(s: UiState, vm: MicroscopeViewModel) {
     val g = s.geometry
     val aspect = g?.uprightAspect ?: 0.75f
     var tap by remember { mutableStateOf<Offset?>(null) }
+    var calibrating by remember { mutableStateOf(false) }
     val busy = s.processing != null
 
     Box(
@@ -147,11 +153,16 @@ private fun Viewfinder(s: UiState, vm: MicroscopeViewModel) {
     ) {
         CameraSurface(s, vm)
         Overlay(s)
+        if (s.measuring) RulerOverlay(s, vm)
         tap?.let { FocusReticle(it) { tap = null } }
         TopBar(s, vm)
         TorchLevel(s, vm)
-        NotePill(s, vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
+        if (s.measuring) MeasureBar(s) { calibrating = true }
+        ToolButtons(s, vm, Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp))
+        if (s.showExposure) ExposurePanel(s, vm)
+        NotePill(s, vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 64.dp))
     }
+    if (calibrating) CalibrateDialog(s, vm) { calibrating = false }
 }
 
 @Composable
@@ -174,6 +185,7 @@ private fun CameraSurface(s: UiState, vm: MicroscopeViewModel) {
                     bufferHeight = preview.height,
                     filter = s.filter,
                     peaking = s.peaking,
+                    zebra = s.showExposure,
                 ),
             )
         },
@@ -197,6 +209,7 @@ private fun CameraSurface(s: UiState, vm: MicroscopeViewModel) {
 private fun Overlay(s: UiState) {
     val measurer = rememberTextMeasurer()
     val fov = s.fieldOfViewUm
+    val approx = if (s.scale?.calibrated == true) "" else "≈ "
     Canvas(Modifier.fillMaxSize()) {
         val c = Offset(size.width / 2, size.height / 2)
         val mark = Color(0x66FFFFFF)
@@ -208,7 +221,7 @@ private fun Overlay(s: UiState) {
             val umPerPx = fov / size.width
             val length = Optics.niceFloor(0.28f * size.width * umPerPx)
             val px = length / umPerPx
-            val label = measurer.measure("≈ " + Optics.formatLength(length), Type.Value.copy(fontSize = 12.sp))
+            val label = measurer.measure(approx + Optics.formatLength(length), Type.Value.copy(fontSize = 12.sp))
             val pad = 8.dp.toPx()
             val x0 = 16.dp.toPx() + pad
             val y0 = size.height - 14.dp.toPx() - pad
@@ -282,7 +295,7 @@ private fun Readout(s: UiState, onClick: () -> Unit) {
     if (lens.manualFocus && lens.focusIsMetric && s.effectiveFocus > 0.05f) {
         parts += "WD ≈ " + "%.0f".format(Optics.distanceMm(s.effectiveFocus)) + " mm"
     }
-    s.fieldOfViewUm?.let { parts += "FOV ≈ " + Optics.formatLength(Optics.niceRound(it)) }
+    s.fieldOfViewUm?.let { parts += (if (s.scale?.calibrated == true) "FOV " else "FOV ≈ ") + Optics.formatLength(Optics.niceRound(it)) }
     if (parts.isEmpty()) parts += lens.label
     Text(
         parts.joinToString("  ·  ") + "  ⓘ",
@@ -523,6 +536,11 @@ private fun sliderColors() = SliderDefaults.colors(
     disabledThumbColor = Palette.Outline,
     disabledActiveTrackColor = Palette.Outline,
     disabledInactiveTrackColor = Palette.SurfaceHigh,
+    // Stepped sliders show their value as text; tick dots only add clutter.
+    activeTickColor = Color.Transparent,
+    inactiveTickColor = Color.Transparent,
+    disabledActiveTickColor = Color.Transparent,
+    disabledInactiveTickColor = Color.Transparent,
 )
 
 @Composable
@@ -636,6 +654,182 @@ private fun InfoDialog(vm: MicroscopeViewModel) {
                 Chip("Close", active = true, description = "Close") { vm.showInfo(false) }
             }
         }
+    }
+}
+
+/** Tools that act on the image: exposure and the measuring line. */
+@Composable
+private fun ToolButtons(s: UiState, vm: MicroscopeViewModel, modifier: Modifier) {
+    val lens = s.lens ?: return
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        if (lens.evRange.first < lens.evRange.last) {
+            val label = if (s.ev == 0) "EV" else "EV " + signed(s.ev * lens.evStep)
+            Chip(label, active = s.showExposure, description = "Exposure compensation", onClick = vm::toggleExposure)
+            Spacer(Modifier.width(8.dp))
+        }
+        RoundIcon(active = s.measuring, badge = null, description = "Measure", onClick = vm::toggleMeasure) { drawRuler(it) }
+    }
+}
+
+private fun signed(v: Float) = (if (v > 0f) "+" else if (v < 0f) "−" else "±") + "%.1f".format(kotlin.math.abs(v))
+
+/** Exposure compensation, with clipped highlights striped in the live view while it is open. */
+@Composable
+private fun BoxScope.ExposurePanel(s: UiState, vm: MicroscopeViewModel) {
+    val lens = s.lens ?: return
+    val range = lens.evRange
+    Row(
+        Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 60.dp)
+            .clip(RoundedCornerShape(50)).background(Palette.Scrim).padding(start = 14.dp, end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("EV", style = Type.Label)
+        Slider(
+            value = s.ev.toFloat(),
+            onValueChange = { vm.setEv(Math.round(it)) },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = (range.last - range.first - 1).coerceAtLeast(0),
+            colors = sliderColors(),
+            modifier = Modifier.width(180.dp).padding(horizontal = 8.dp).semantics { contentDescription = "Exposure compensation" },
+        )
+        Text(signed(s.ev * lens.evStep), style = Type.Value, textAlign = TextAlign.End, modifier = Modifier.width(40.dp))
+    }
+}
+
+/** The measuring line: drag either end; its length is shown beside it. */
+@Composable
+private fun RulerOverlay(s: UiState, vm: MicroscopeViewModel) {
+    val measurer = rememberTextMeasurer()
+    val um = s.rulerUm
+    val label = when {
+        um == null -> "no scale: calibrate"
+        s.scale?.calibrated == true -> Optics.formatMeasure(um)
+        else -> "≈ " + Optics.formatMeasure(um)
+    }
+    Box(
+        Modifier.fillMaxSize().pointerInput(Unit) {
+            val grab = 36.dp.toPx()
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val r = vm.ui.value.ruler
+                val d0 = (down.position - Offset(r.x0 * size.width, r.y0 * size.height)).getDistance()
+                val d1 = (down.position - Offset(r.x1 * size.width, r.y1 * size.height)).getDistance()
+                // Only a touch on an end belongs to the ruler; anything else pans, zooms or focuses.
+                val end = if (d0 <= d1 && d0 < grab) 0 else if (d1 < grab) 1 else return@awaitEachGesture
+                down.consume()
+                while (true) {
+                    val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    if (!change.pressed) break
+                    vm.moveRuler(end, change.position.x / size.width, change.position.y / size.height)
+                    change.consume()
+                }
+            }
+        },
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val r = s.ruler
+            val a = Offset(r.x0 * size.width, r.y0 * size.height)
+            val b = Offset(r.x1 * size.width, r.y1 * size.height)
+            val line = Palette.Warn
+            drawLine(Color(0x99000000), a, b, 4.dp.toPx(), StrokeCap.Round)
+            drawLine(line, a, b, 2.dp.toPx(), StrokeCap.Round)
+            for (p in listOf(a, b)) {
+                drawCircle(line.copy(alpha = 0.25f), 18.dp.toPx(), p)
+                drawCircle(line, 18.dp.toPx(), p, style = Stroke(1.5.dp.toPx()))
+                drawCircle(line, 2.5.dp.toPx(), p)
+            }
+            val text = measurer.measure(label, Type.Value.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold))
+            val mid = Offset((a.x + b.x) / 2, (a.y + b.y) / 2)
+            val pad = 6.dp.toPx()
+            val tl = Offset(
+                (mid.x - text.size.width / 2).coerceIn(pad, size.width - text.size.width - pad),
+                (mid.y - text.size.height - 16.dp.toPx()).coerceIn(pad, size.height - text.size.height - pad),
+            )
+            drawRoundRect(
+                Palette.Scrim, topLeft = tl - Offset(pad, pad / 2),
+                size = Size(text.size.width + 2 * pad, text.size.height + pad),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(pad, pad),
+            )
+            drawText(text, topLeft = tl)
+        }
+    }
+}
+
+/** Calibration state of the scale, with the way to calibrate it. */
+@Composable
+private fun BoxScope.MeasureBar(s: UiState, onCalibrate: () -> Unit) {
+    val status = when {
+        s.scale?.calibrated == true -> "Calibrated"
+        s.calibration != null -> "Calibrated at another focus"
+        s.scale != null -> "Estimated from the lens"
+        else -> "No scale for this lens"
+    }
+    Row(
+        Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 58.dp, start = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            status, style = Type.Small.copy(color = Palette.Text),
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(Palette.Scrim).padding(horizontal = 12.dp, vertical = 7.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Chip("Calibrate", active = false, description = "Calibrate against a known length", onClick = onCalibrate)
+    }
+}
+
+/** Asks what the measuring line spans on a reference (a ruler division, a pin pitch). */
+@Composable
+private fun CalibrateDialog(s: UiState, vm: MicroscopeViewModel, onDone: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    Dialog(onDismissRequest = onDone) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Palette.Surface)
+                .border(1.dp, Palette.Outline, RoundedCornerShape(20.dp)).padding(20.dp),
+        ) {
+            Text("Calibrate scale", style = Type.Value.copy(fontSize = 18.sp, fontWeight = FontWeight.SemiBold))
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Lay the line across a known length, such as divisions of a steel ruler, then enter it. " +
+                    "The calibration is kept for this lens and holds at this focus setting.",
+                style = Type.Small,
+            )
+            Spacer(Modifier.height(14.dp))
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("Known length (mm)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (s.calibration != null) {
+                    Chip("Forget", active = false, description = "Forget the calibration") {
+                        vm.clearCalibration()
+                        onDone()
+                    }
+                    Spacer(Modifier.weight(1f))
+                }
+                Chip("Cancel", active = false, description = "Cancel", onClick = onDone)
+                Spacer(Modifier.width(10.dp))
+                Chip("Calibrate", active = true, description = "Calibrate") {
+                    val mm = text.trim().replace(',', '.').toFloatOrNull()
+                    if (mm != null && vm.calibrate(mm * 1000f)) onDone() else vm.note("Enter a length and make the line longer")
+                }
+            }
+        }
+    }
+}
+
+private fun DrawScope.drawRuler(c: Color) {
+    val w = size.width
+    val h = size.height
+    val st = 1.5.dp.toPx()
+    drawRect(c, topLeft = Offset(0f, h * 0.3f), size = Size(w, h * 0.4f), style = Stroke(st))
+    for (i in 1..4) {
+        val x = w * i / 5f
+        drawLine(c, Offset(x, h * 0.3f), Offset(x, h * (if (i % 2 == 0) 0.55f else 0.45f)), st)
     }
 }
 

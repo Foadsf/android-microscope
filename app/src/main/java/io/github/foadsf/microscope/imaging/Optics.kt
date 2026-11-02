@@ -1,5 +1,6 @@
 package io.github.foadsf.microscope.imaging
 
+import java.util.Locale
 import kotlin.math.floor
 import kotlin.math.log10
 import kotlin.math.pow
@@ -74,6 +75,14 @@ object Optics {
         um >= 10_000f -> "${trim(um / 10_000f)} cm"
         um >= 1000f -> "${trim(um / 1000f)} mm"
         else -> "${trim(um)} µm"
+    }
+
+    /** A measured length with three significant digits: "84.2 µm", "512 µm", "1.27 mm", "12.4 mm". */
+    fun formatMeasure(um: Float): String = when {
+        um >= 10_000f -> "%.1f mm".format(Locale.ROOT, um / 1000f)
+        um >= 1000f -> "%.2f mm".format(Locale.ROOT, um / 1000f)
+        um >= 100f -> "%.0f µm".format(Locale.ROOT, um)
+        else -> "%.1f µm".format(Locale.ROOT, um)
     }
 
     private fun trim(v: Float): String {

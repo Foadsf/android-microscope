@@ -6,6 +6,7 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.util.Log
+import androidx.core.content.edit
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,9 +14,13 @@ import io.github.foadsf.microscope.camera.Lens
 import io.github.foadsf.microscope.camera.LensCatalog
 import io.github.foadsf.microscope.camera.MicroscopeCamera
 import io.github.foadsf.microscope.gl.Filter
+import io.github.foadsf.microscope.imaging.Calibration
 import io.github.foadsf.microscope.imaging.CaptureMode
 import io.github.foadsf.microscope.imaging.Optics
 import io.github.foadsf.microscope.imaging.Pipeline
+import io.github.foadsf.microscope.imaging.Scale
+import io.github.foadsf.microscope.imaging.ScaleEstimate
+import io.github.foadsf.microscope.imaging.SteadyGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,6 +39,9 @@ data class Processing(val label: String, val progress: Float)
 
 data class Note(val text: String, val id: Long = System.nanoTime())
 
+/** The two ends of the measuring line, in view-normalised coordinates. */
+data class Ruler(val x0: Float = 0.3f, val y0: Float = 0.5f, val x1: Float = 0.7f, val y1: Float = 0.5f)
+
 data class UiState(
     val hasPermission: Boolean = false,
     val lenses: List<Lens> = emptyList(),
@@ -50,6 +58,14 @@ data class UiState(
     /** Torch brightness step where the device supports it (see Lens.torchStrengthMax). */
     val torchLevel: Int = 1,
     val showInfo: Boolean = false,
+    /** Exposure compensation in Lens.evStep units. */
+    val ev: Int = 0,
+    /** The exposure slider is open (and the live view marks clipped highlights). */
+    val showExposure: Boolean = false,
+    val measuring: Boolean = false,
+    val ruler: Ruler = Ruler(),
+    /** The current lens's calibration against a known length, if the user made one. */
+    val calibration: Calibration? = null,
     val filter: Filter = Filter.COLOUR,
     val peaking: Boolean = true,
     val mode: CaptureMode = CaptureMode.SUPER_RES,
@@ -67,13 +83,29 @@ data class UiState(
     /** Focus distance actually reached if the HAL reports it, else the requested one. */
     val effectiveFocus: Float get() = telemetry.focusDiopters ?: focus
 
-    /** Specimen size of one active-array pixel, or null when the lens cannot tell distances. */
-    val umPerSensorPixel: Float?
+    /**
+     * Specimen size of one active-array pixel: the thin-lens estimate, corrected by the user's
+     * calibration where there is one. Null when neither can tell.
+     */
+    val scale: ScaleEstimate?
         get() {
             val l = lens ?: return null
-            if (!l.manualFocus || !l.focusIsMetric || effectiveFocus <= 0.05f) return null
-            val v = Optics.objectPixelUm(l.pixelPitchUm, l.focalMm, Optics.distanceMm(effectiveFocus))
-            return if (v.isFinite()) v else null
+            val model = if (l.manualFocus && l.focusIsMetric) {
+                { d: Float -> if (d > 0.05f) Optics.objectPixelUm(l.pixelPitchUm, l.focalMm, Optics.distanceMm(d)) else null }
+            } else {
+                null
+            }
+            return Scale.estimate(model, calibration, effectiveFocus)
+        }
+
+    val umPerSensorPixel: Float? get() = scale?.umPerSensorPixel
+
+    /** Length of the measuring line on the specimen, in µm. */
+    val rulerUm: Float?
+        get() {
+            val g = geometry ?: return null
+            val um = umPerSensorPixel ?: return null
+            return g.sensorLength(ruler.x0, ruler.y0, ruler.x1, ruler.y1) * um
         }
 
     /** Width of specimen in view, in µm. */
@@ -93,6 +125,7 @@ data class UiState(
 
 class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
     private val camera = MicroscopeCamera(app)
+    private val calibrations = app.getSharedPreferences("calibration", android.content.Context.MODE_PRIVATE)
     private val state = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = state
 
@@ -164,6 +197,8 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                 cy = cy,
                 torchOn = it.torchMode == TorchMode.ON,
                 torchLevel = lens.torchStrengthDefault.coerceIn(1, lens.torchStrengthMax),
+                ev = 0,
+                calibration = Calibration.decode(calibrations.getString(lens.key, null)),
             )
         }
         darkFrames = 0
@@ -241,6 +276,46 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun showInfo(show: Boolean) = state.update { it.copy(showInfo = show) }
 
+    fun toggleExposure() = state.update { it.copy(showExposure = !it.showExposure) }
+
+    fun setEv(steps: Int) {
+        val range = state.value.lens?.evRange ?: return
+        state.update { it.copy(ev = steps.coerceIn(range)) }
+        pushControls()
+    }
+
+    fun toggleMeasure() = state.update { it.copy(measuring = !it.measuring) }
+
+    /** Moves end [end] (0 or 1) of the measuring line to view-normalised (vx, vy). */
+    fun moveRuler(end: Int, vx: Float, vy: Float) = state.update {
+        val x = vx.coerceIn(0f, 1f)
+        val y = vy.coerceIn(0f, 1f)
+        it.copy(ruler = if (end == 0) it.ruler.copy(x0 = x, y0 = y) else it.ruler.copy(x1 = x, y1 = y))
+    }
+
+    /**
+     * Calibrates the current lens at the current focus: the measuring line spans [knownUm] on the
+     * specimen. Returns false if the line is too short to calibrate against.
+     */
+    fun calibrate(knownUm: Float): Boolean {
+        val s = state.value
+        val lens = s.lens ?: return false
+        val g = s.geometry ?: return false
+        val px = g.sensorLength(s.ruler.x0, s.ruler.y0, s.ruler.x1, s.ruler.y1)
+        if (px < MIN_CALIBRATION_PX || !(knownUm > 0f) || !knownUm.isFinite()) return false
+        val c = Calibration(s.effectiveFocus, knownUm / px)
+        calibrations.edit { putString(lens.key, Calibration.encode(c)) }
+        state.update { it.copy(calibration = c) }
+        note("Calibrated: %.2f µm per sensor pixel".format(c.umPerSensorPixel))
+        return true
+    }
+
+    fun clearCalibration() {
+        val lens = state.value.lens ?: return
+        calibrations.edit { remove(lens.key) }
+        state.update { it.copy(calibration = null) }
+    }
+
     /** Plain-text report of the device and every lens the app found, for bug reports. */
     fun diagnostics(): String = Diagnostics.report(getApplication(), state.value)
 
@@ -301,6 +376,12 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         viewModelScope.launch {
             try {
+                // Let the jolt of pressing the shutter die away before exposing.
+                progress("Hold still", 0f)
+                val t0Steady = System.nanoTime()
+                val threshold = SteadyGate.threshold(g.lens.pixelPitchUm, g.lens.focalMm, s.telemetry.exposureNs ?: 33_000_000L)
+                val steady = SteadyHold.await(app, threshold, STEADY_TIMEOUT_MS)
+                Log.i(TAG, "steady=$steady after ${(System.nanoTime() - t0Steady) / 1_000_000} ms (threshold %.3f rad/s)".format(threshold))
                 progress("Capturing", 0f)
                 val frames = camera.capture(spec) { k -> progress("Capturing $k / $n", 0.3f * k / n) }
                 progress(if (mode == CaptureMode.PHOTO) "Developing" else "Aligning ${frames.size} frames", 0.3f)
@@ -321,7 +402,7 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                     val bmp = Bitmap.createBitmap(rgb.argb, rgb.width, rgb.height, Bitmap.Config.ARGB_8888)
                     val umPerOut = s.umPerSensorPixel?.let { it * g.lens.activeArray.width() / streams.captureSize.width / scale }
                     val meta = CaptureMeta(
-                        description = describe(mode, frames.size, umPerOut, s),
+                        description = describe(mode, frames.size, umPerOut, s.scale?.calibrated == true, s),
                         focalMm = g.lens.focalMm,
                         fNumber = s.telemetry.aperture ?: s.aperture,
                         iso = s.telemetry.iso,
@@ -349,7 +430,7 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun describe(mode: CaptureMode, frames: Int, umPerPx: Float?, s: UiState): String {
+    private fun describe(mode: CaptureMode, frames: Int, umPerPx: Float?, calibrated: Boolean, s: UiState): String {
         val what = when (mode) {
             CaptureMode.PHOTO -> "Single frame"
             CaptureMode.SUPER_RES -> "Super-resolution merge of $frames frames"
@@ -357,7 +438,9 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
         }
         // EXIF text fields are ASCII, so no "≈" or "µ" here.
         val lens = s.lens?.label ?: ""
-        val scale = umPerPx?.let { ", approx. %.2f um/px (uncalibrated)".format(Locale.ROOT, it) } ?: ""
+        val scale = umPerPx?.let {
+            if (calibrated) ", %.3f um/px (calibrated)".format(Locale.ROOT, it) else ", approx. %.2f um/px (uncalibrated)".format(Locale.ROOT, it)
+        } ?: ""
         val dist = if (s.lens?.focusIsMetric == true && s.effectiveFocus > 0.05f) {
             ", focus approx. %.0f mm".format(Locale.ROOT, Optics.distanceMm(s.effectiveFocus))
         } else {
@@ -394,7 +477,7 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
     private fun pushControls() {
         val s = state.value
         val g = s.geometry ?: return
-        camera.setControls(MicroscopeCamera.Controls(s.focus, s.aperture, s.torchOn, s.torchLevel, g.cropRegion()))
+        camera.setControls(MicroscopeCamera.Controls(s.focus, s.aperture, s.torchOn, s.torchLevel, s.ev, g.cropRegion()))
     }
 
     /** Opens or closes the camera to match permission, lifecycle, surface and lens. */
@@ -440,6 +523,10 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val TAG = "Microscope"
         const val MAX_ZOOM = 16f
+        private const val STEADY_TIMEOUT_MS = 1500L
+
+        /** A calibration line shorter than this many sensor pixels is too imprecise to use. */
+        private const val MIN_CALIBRATION_PX = 50f
         val BURST_OPTIONS = intArrayOf(4, 8, 12)
         val STACK_OPTIONS = intArrayOf(5, 9, 15)
     }
