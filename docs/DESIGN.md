@@ -180,6 +180,55 @@ distance well inside the hyperfocal distance. With c = 2 pixels and 20 % overlap
 camera at f/2.4 steps about 0.58 D, which is about 3.7 mm at 80 mm. The test fuses 5 frames of a
 depth ramp to 34.4 dB, against 23.2 dB for the best single frame.
 
+## Surface height
+
+`DepthFromFocus` measures the surface from the same registered bracket by **focus variation**, also
+called shape from focus (Nayar & Nakagawa 1994). It is the method ISO 25178-606 standardises for
+areal topography, and the one focus-variation microscopes use. A phone has the essential part: a
+lens whose focus it can step.
+
+1. Each slice is resampled onto the reference with the stack's registration, so focus breathing
+   does not move features between slices.
+2. Its focus measure is the squared modified Laplacian, `(|2I − I₋ₓ − I₊ₓ| + |2I − I₋ᵧ − I₊ᵧ|)²`,
+   pooled down to a grid of at most 0.6 MP and then over a window of σ ≈ 1.7 cells.
+3. Each cell's focus curve across the slices peaks where that part of the surface was in focus.
+   A Gaussian through the best slice and its two neighbours gives the peak to a fraction of a
+   slice. The bracket is evenly spaced in diopters, so that fraction converts to a focus distance,
+   and the distance converts to height above the farthest point (its 99th percentile, so stray
+   cells do not set the zero).
+4. A cell is reported only if the curve really peaks:
+   - the peak is not at either end of the bracket;
+   - it is at least 2× the curve's mean;
+   - the curve falls for two slices on each side, as defocus does.
+
+   Pooled noise alone passes these tests at under 0.5 % of cells. Untextured areas have no curve
+   and stay unknown.
+
+Outputs: a viridis picture the size of the fused one, with unknown cells dark grey and a legend,
+and a binary PLY point cloud (x, y, z in mm, coloured from the fused picture).
+
+Tests on a 7-slice depth ramp with σ = 1.5 noise:
+
+| Grid | Slice error (RMS) | Coverage |
+|---|---|---|
+| Full resolution | 0.07 | 92 % |
+| Half resolution | 0.06 | 99.5 % |
+
+Without the Gaussian interpolation the error is 0.28 slices, and the test fails.
+
+**What that means in millimetres.** A slice is 0.8 of the depth of field: about 3.7 mm at 80 mm
+on a Note10 at f/2.4, and 2.3 mm at f/1.5. A tenth of a slice is therefore 0.2 to 0.4 mm. This is a
+coarse profilometer: it shows relief, warp and steps, not micrometre roughness.
+
+**Limits.**
+
+- Heights depend on the focus distances the HAL reports, so they carry its error and are marked
+  "≈".
+- The map is only as good as the stack's registration. Unregistered shifts of up to ±16 px on a
+  textured scene raised the error only to 0.2 slices. But on the emulator, whose fake camera jumps
+  between frames, sparse edges produced false heights, just as they ghost the fused picture. Use a
+  stand.
+
 ## Scale
 
 ```
@@ -213,6 +262,9 @@ on zoom or on screen size.
 - H. Takeda, S. Farsiu, P. Milanfar, "Kernel Regression for Image Processing and Reconstruction",
   *IEEE Trans. Image Processing* 16(2), 2007.
 - B. Wronski et al., "Handheld Multi-Frame Super-Resolution", *ACM Trans. Graphics* 38(4), 2019.
+- S. K. Nayar, Y. Nakagawa, "Shape from Focus", *IEEE Trans. PAMI* 16(8), 1994.
+- ISO 25178-606:2015, Geometrical product specifications — Surface texture: Areal — Part 606:
+  Nominal characteristics of non-contact (focus variation) instruments.
 - S. W. Hasinoff et al., "Burst photography for high dynamic range and low-light imaging on mobile
   cameras", *ACM Trans. Graphics* 35(6), 2016.
 - Android `CameraDevice`, `CaptureRequest` and `CameraCharacteristics` reference documentation.

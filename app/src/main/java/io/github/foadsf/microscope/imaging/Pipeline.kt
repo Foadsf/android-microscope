@@ -25,10 +25,28 @@ object Pipeline {
             val scale = superResScale(frames[0].width * frames[0].height)
             SuperResolution.merge(frames, warps, scale, sharpen) { progress(0.3f + 0.7f * it) }
         }
-        else -> {
-            val warps = alignChained(frames, frames.size / 2) { progress(0.3f * it) }
-            FocusStack.fuse(frames, warps) { progress(0.3f + 0.7f * it) }
+        else -> focusStack(frames, null, progress).image
+    }
+
+    /** A fused focus stack, and the surface height map when the slices' focus settings are known. */
+    class StackResult(val image: RgbImage, val height: HeightMap?)
+
+    /**
+     * Registers and fuses a focus bracket. With [diopters] (each slice's focus setting, in metric
+     * diopters) it also measures the surface by focus variation ([DepthFromFocus]), reusing the
+     * same registration.
+     */
+    fun focusStack(frames: List<YuvFrame>, diopters: FloatArray?, progress: (Float) -> Unit = {}): StackResult {
+        val warps = alignChained(frames, frames.size / 2) { progress(0.3f * it) }
+        val withHeight = diopters != null && frames.size >= 3
+        val fuseShare = if (withHeight) 0.5f else 0.7f
+        val image = FocusStack.fuse(frames, warps) { progress(0.3f + fuseShare * it) }
+        val height = if (withHeight) {
+            DepthFromFocus.estimate(frames, warps, diopters!!) { progress(0.8f + 0.2f * it) }
+        } else {
+            null
         }
+        return StackResult(image, height)
     }
 
     /** Every frame registered directly to frame 0 (a handheld burst: all frames look alike). */

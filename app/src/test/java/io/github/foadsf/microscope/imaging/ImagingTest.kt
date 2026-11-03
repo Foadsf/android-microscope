@@ -44,6 +44,42 @@ private fun psnr(a: Plane, b: Plane, border: Int): Double {
     return 10 * log10(255.0 * 255.0 / (se / n))
 }
 
+/** A focus bracket of a surface whose depth rises left to right through slices 0..n-1. */
+private fun depthRampBracket(n: Int, w: Int, h: Int, noise: Double, seed: Long): List<YuvFrame> {
+    val s = Scene(13, 0.9)
+    val sharp = Array(h) { y -> DoubleArray(w) { x -> s.at(x.toDouble(), y.toDouble()) } }
+    val r = Random(seed)
+    return (0 until n).map { k ->
+        fun sigma(x: Int) = 0.2 + 1.2 * abs(x.toDouble() / w * (n - 1) - k)
+        // Separable Gaussian whose width follows the defocus at each column.
+        val tmp = Array(h) { DoubleArray(w) }
+        for (x in 0 until w) {
+            val sg = sigma(x)
+            val rad = (3 * sg).toInt().coerceAtLeast(1)
+            val kern = DoubleArray(2 * rad + 1) { exp(-((it - rad) * (it - rad)) / (2 * sg * sg)) }
+            val ks = kern.sum()
+            for (y in 0 until h) {
+                var acc = 0.0
+                for (j in -rad..rad) acc += kern[j + rad] * sharp[(y + j).coerceIn(0, h - 1)][x]
+                tmp[y][x] = acc / ks
+            }
+        }
+        val p = Plane(w, h)
+        for (x in 0 until w) {
+            val sg = sigma(x)
+            val rad = (3 * sg).toInt().coerceAtLeast(1)
+            val kern = DoubleArray(2 * rad + 1) { exp(-((it - rad) * (it - rad)) / (2 * sg * sg)) }
+            val ks = kern.sum()
+            for (y in 0 until h) {
+                var acc = 0.0
+                for (i in -rad..rad) acc += kern[i + rad] * tmp[y][(x + i).coerceIn(0, w - 1)]
+                p.data[y * w + x] = (acc / ks + r.nextGaussian() * noise).toFloat()
+            }
+        }
+        frameOf(p)
+    }
+}
+
 class ImagingTest {
     @Test
     fun laplacianPyramidIsExactlyInvertible() {
@@ -335,5 +371,56 @@ class ImagingTest {
         println("edges: steered %.2f dB, isotropic %.2f dB; texture: steered %.2f dB, isotropic %.2f dB".format(steered, plain, texSteered, texPlain))
         assertTrue("steering should sharpen edges: $steered vs $plain dB", steered > plain + 0.5)
         assertTrue("steering must not cost texture: $texSteered vs $texPlain dB", texSteered > texPlain - 0.1)
+    }
+
+    @Test
+    fun focusVariationRecoversTheDepthRamp() {
+        val n = 7
+        val w = 336
+        val h = 120
+        val frames = depthRampBracket(n, w, h, noise = 1.5, seed = 21)
+        // Evenly spaced in diopters, near to far, as Optics.bracket plans them.
+        val diopters = FloatArray(n) { 12f - 0.5f * it }
+        val warps = List(n) { Affine.IDENTITY }
+        for (maxCells in intArrayOf(w * h, w * h / 4)) {
+            val map = DepthFromFocus.estimate(frames, warps, diopters, maxCells)
+            val st = map.step
+            var se = 0.0
+            var count = 0
+            var inside = 0
+            for (gy in 0 until map.height) for (gx in 0 until map.width) {
+                val cx = gx * st + 0.5 * (st - 1)
+                val cy = gy * st + 0.5 * (st - 1)
+                val truth = cx / w * (n - 1)
+                if (truth < 0.75 || truth > n - 1.75 || cy < 8 || cy > h - 9) continue
+                inside++
+                val est = map.index[gy * map.width + gx]
+                if (est.isNaN()) continue
+                se += (est - truth) * (est - truth)
+                count++
+            }
+            val rms = sqrt(se / count)
+            val coverage = count.toDouble() / inside
+            println("focus variation, grid step $st: slice RMS error %.3f, coverage %.1f %%".format(rms, 100 * coverage))
+            assertTrue("slice error $rms", rms < 0.2)
+            assertTrue("coverage $coverage", coverage > 0.9)
+            // Heights follow the distances the slices were focused at: the mid-height column sits
+            // at the difference between the far end and slice 3, within the slice error.
+            val col = (3.0 / (n - 1) * w / st).toInt()
+            val row = map.height / 2
+            val expected = Optics.distanceMm(diopters[5]) - Optics.distanceMm(diopters[3])
+            val far = (0 until map.width).maxOf { gx -> map.index[row * map.width + gx].takeIf { !it.isNaN() } ?: 0f }
+            val got = map.mm[row * map.width + col] - (map.mm.filterIndexed { i, v -> !v.isNaN() && i / map.width == row && map.index[i] >= far - 0.1f }.average().toFloat())
+            assertTrue("height of slice 3 above the far end: $got vs ≈ $expected mm", abs(got - expected) < 0.25f * expected)
+        }
+        // A surface with no texture has no focus curve: nothing may be reported.
+        val flat = List(n) { frameOf(Plane(w, h, FloatArray(w * h) { 128f + (Random(it.toLong()).nextGaussian() * 0.0).toFloat() })) }
+        assertEquals(0, DepthFromFocus.estimate(flat, warps, diopters).validCount)
+        // Pure noise has focus curves with no consistent peak: almost nothing is reported.
+        val noise = Random(5)
+        val noisy = List(n) { frameOf(Plane(w, h, FloatArray(w * h) { (128 + noise.nextGaussian() * 4).toFloat() })) }
+        val nm = DepthFromFocus.estimate(noisy, warps, diopters)
+        println("focus variation on pure noise: %.2f %% of cells reported".format(100.0 * nm.validCount / (nm.width * nm.height)))
+        assertTrue("noise gave ${nm.validCount} of ${nm.width * nm.height} heights", nm.validCount < 0.02 * nm.width * nm.height)
     }
 }

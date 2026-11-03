@@ -459,7 +459,8 @@ private fun modeCaption(s: UiState, vm: MicroscopeViewModel): String = when (s.m
         } else {
             ""
         }
-        "${s.stackFrames} slices$depth  ⟳"
+        val height = if (lens != null && lens.manualFocus && lens.focusIsMetric) " + height map" else ""
+        "${s.stackFrames} slices$depth$height  ⟳"
     }
 }
 

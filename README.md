@@ -19,6 +19,9 @@ modes that do more than one frame can.
   averages away noise.
 - **Focus stacking:** 5, 9 or 15 frames bracketed around your focus, one depth of field apart,
   fused into a single all-in-focus picture.
+- **Surface height** from the same stack, by focus variation: a colour height map beside the
+  picture, and a point cloud (`.ply`, in mm) in *Documents/Microscope* for CloudCompare, MeshLab
+  or FreeCAD. Height resolution is about a tenth of a slice, roughly 0.2 to 0.5 mm on a Note10.
 - **Every lens the phone exposes.** Lenses are ranked by how small a specimen pixel they can
   resolve at closest focus, and the best one opens first.
 - **Torch:** off, on, or auto (turns on when the scene is dark). The aperture switches too on
@@ -45,7 +48,9 @@ checked against, a Galaxy Note10 (SM-N970F).
    - **Photo:** one frame, instantly.
    - **Super-res:** hold the phone by hand. A rigid stand gives no sub-pixel motion, so the burst
      can only denoise. Tap the caption to change the frame count.
-   - **Stack:** use a stand. The caption shows how deep the stack reaches.
+   - **Stack:** use a stand. The caption shows how deep the stack reaches. It also saves the
+     surface height map and point cloud. Areas without texture, and areas that moved between
+     slices, are left unknown (dark grey) rather than guessed.
 
 The scale bar and the "WD"/"FOV" readout come from thin-lens optics and the focus distance the
 camera reports. They are **approximate** (±10 % or worse), and are hidden on phones that report
@@ -67,6 +72,7 @@ short:
 | Registration | Coarse-to-fine Gaussian pyramid, exhaustive search at the top, then inverse-compositional Lucas-Kanade with a similarity warp (Baker & Matthews 2004) |
 | Super-resolution | Forward-mapped samples, two-scale first-order kernel regression (Takeda, Farsiu & Milanfar 2007) with edge-steered kernels (Wronski et al. 2019), robust weights against motion |
 | Focus stacking | Laplacian-pyramid fusion (Burt & Adelson 1983) with energy-weighted coefficients, tiled across all cores |
+| Surface height | Focus variation / shape from focus (Nayar & Nakagawa 1994; ISO 25178-606): modified-Laplacian focus curves, Gaussian peak interpolation |
 | Live view | OpenGL ES 3 external-texture shader: unsharp mask, Sobel peaking, clipping zebra |
 
 The imaging code (`app/src/main/java/.../imaging`) is plain Kotlin with no Android dependencies.

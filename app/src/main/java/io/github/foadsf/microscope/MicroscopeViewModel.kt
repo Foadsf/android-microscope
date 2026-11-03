@@ -16,6 +16,8 @@ import io.github.foadsf.microscope.camera.MicroscopeCamera
 import io.github.foadsf.microscope.gl.Filter
 import io.github.foadsf.microscope.imaging.Calibration
 import io.github.foadsf.microscope.imaging.CaptureMode
+import io.github.foadsf.microscope.imaging.HeightMap
+import io.github.foadsf.microscope.imaging.RgbImage
 import io.github.foadsf.microscope.imaging.Optics
 import io.github.foadsf.microscope.imaging.Pipeline
 import io.github.foadsf.microscope.imaging.Scale
@@ -386,15 +388,26 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                 val frames = camera.capture(spec) { k -> progress("Capturing $k / $n", 0.3f * k / n) }
                 progress(if (mode == CaptureMode.PHOTO) "Developing" else "Aligning ${frames.size} frames", 0.3f)
                 val t0 = System.nanoTime()
-                val rgb = withContext(Dispatchers.Default) {
-                    Pipeline.process(mode, frames, sharpen = if (mode == CaptureMode.SUPER_RES) 0.5f else 0f) { p ->
+                // A bracket in metric diopters also yields the surface height (focus variation).
+                val measure = mode == CaptureMode.FOCUS_STACK && g.lens.manualFocus && g.lens.focusIsMetric
+                val rotation = g.lens.sensorOrientation
+                val (rgb, height) = withContext(Dispatchers.Default) {
+                    val onProgress = { p: Float ->
                         val label = when {
                             p < 0.3f -> "Aligning ${frames.size} frames"
+                            mode == CaptureMode.FOCUS_STACK && measure && p >= 0.8f -> "Measuring height"
                             mode == CaptureMode.FOCUS_STACK -> "Fusing focus stack"
                             else -> "Merging burst"
                         }
                         progress(label, 0.3f + 0.6f * p)
-                    }.rotated(g.lens.sensorOrientation)
+                    }
+                    if (mode == CaptureMode.FOCUS_STACK && frames.size > 1) {
+                        val r = Pipeline.focusStack(frames, if (measure) spec.focus else null, onProgress)
+                        r.image.rotated(rotation) to r.height?.rotated(rotation)
+                    } else {
+                        Pipeline.process(mode, frames, sharpen = if (mode == CaptureMode.SUPER_RES) 0.5f else 0f, onProgress)
+                            .rotated(rotation) to null
+                    }
                 }
                 Log.i(TAG, "$mode: ${frames.size} x ${spec.roi.width()}x${spec.roi.height()} -> ${rgb.width}x${rgb.height} in ${(System.nanoTime() - t0) / 1_000_000} ms")
                 progress("Saving", 0.95f)
@@ -409,14 +422,17 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                         exposureNs = s.telemetry.exposureNs,
                         umPerPixel = umPerOut,
                     )
-                    val uri = Gallery.save(app, bmp, meta)
+                    val stem = Gallery.stem()
+                    val uri = Gallery.save(app, bmp, meta, stem)
+                    if (height != null && height.validCount > 0) saveHeight(app, stem, height, rgb, bmp, meta, umPerOut)
                     val tw = 192
                     val thumb = bmp.scale(tw, max(1, tw * bmp.height / bmp.width))
                     bmp.recycle()
                     uri to thumb
                 }
                 state.update { it.copy(lastUri = uri, thumbnail = thumb) }
-                note("Saved ${rgb.width} × ${rgb.height} to Pictures/Microscope")
+                val extra = if (height != null && height.validCount > 0) " with its height map" else ""
+                note("Saved ${rgb.width} × ${rgb.height}$extra to Pictures/Microscope")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: OutOfMemoryError) {
@@ -427,6 +443,25 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 state.update { it.copy(processing = null) }
             }
+        }
+    }
+
+    /**
+     * Saves the height map as a picture beside the fused one ([stem]_height.jpg) and, when the lateral
+     * scale is known, as a point cloud in Documents/Microscope ([stem].ply).
+     */
+    private fun saveHeight(
+        app: Application, stem: String, height: HeightMap, rgb: RgbImage, fused: Bitmap, meta: CaptureMeta, umPerOut: Float?,
+    ) {
+        val top = height.maxMm ?: 0f
+        val share = 100f * height.validCount / (height.width * height.height)
+        val picture = HeightRender.picture(height, fused.width, fused.height, approximate = true)
+        val text = "Surface height by focus variation, 0 to approx. %.2f mm, measured at %.0f%% of points; from %s"
+            .format(Locale.ROOT, top, share, meta.description)
+        Gallery.save(app, picture, meta.copy(description = text), stem + "_height")
+        picture.recycle()
+        if (umPerOut != null) {
+            Gallery.saveDocument(app, "$stem.ply", "application/octet-stream", HeightRender.ply(height, rgb, umPerOut * height.step))
         }
     }
 

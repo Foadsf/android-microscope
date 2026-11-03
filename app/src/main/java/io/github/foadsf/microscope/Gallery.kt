@@ -27,10 +27,13 @@ data class CaptureMeta(
 object Gallery {
     private const val FOLDER = "Microscope"
 
-    /** Saves [bitmap] as a JPEG in Pictures/Microscope via MediaStore and returns its URI. */
-    fun save(context: Context, bitmap: Bitmap, meta: CaptureMeta): Uri {
+    /** A file-name stem for one capture, shared by everything saved from it. */
+    fun stem(now: Date = Date()): String = "MICRO_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(now)
+
+    /** Saves [bitmap] as [stem].jpg in Pictures/Microscope via MediaStore and returns its URI. */
+    fun save(context: Context, bitmap: Bitmap, meta: CaptureMeta, stem: String = stem()): Uri {
         val now = Date()
-        val name = "MICRO_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(now) + ".jpg"
+        val name = "$stem.jpg"
 
         // ExifInterface edits files in place, so build the JPEG in the app cache first.
         val tmp = File(context.cacheDir, "pending.jpg")
@@ -78,6 +81,29 @@ object Gallery {
             throw e
         } finally {
             tmp.delete()
+        }
+        return uri
+    }
+
+    /** Saves [bytes] as Documents/Microscope/[name] (for data files such as point clouds). */
+    fun saveDocument(context: Context, name: String, mime: String, bytes: ByteArray): Uri {
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/" + FOLDER)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
+            ?: error("MediaStore refused $name")
+        try {
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: error("Cannot write $name")
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
         }
         return uri
     }
