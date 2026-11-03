@@ -11,7 +11,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /** A band-limited analytic scene, so warped and blurred versions can be generated exactly. */
-private class Scene(seed: Long, maxFreq: Double, count: Int = 24) {
+internal class Scene(seed: Long, maxFreq: Double, count: Int = 24) {
     private val r = Random(seed)
     private val kx = DoubleArray(count) { (r.nextDouble() * 2 - 1) * maxFreq }
     private val ky = DoubleArray(count) { (r.nextDouble() * 2 - 1) * maxFreq }
@@ -25,7 +25,7 @@ private class Scene(seed: Long, maxFreq: Double, count: Int = 24) {
     }
 }
 
-private fun frameOf(luma: Plane): YuvFrame {
+internal fun frameOf(luma: Plane): YuvFrame {
     val y = ByteArray(luma.data.size) { luma.data[it].toInt().coerceIn(0, 255).toByte() }
     val c = ByteArray(luma.data.size / 4) { 128.toByte() }
     return YuvFrame(luma.width, luma.height, y, c, c.copyOf())

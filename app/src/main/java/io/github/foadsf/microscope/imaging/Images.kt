@@ -11,8 +11,11 @@ import kotlin.math.roundToInt
 /**
  * One planar YCbCr 4:2:0 frame, 8 bits per sample, full-range BT.601 (JFIF), which is how Camera2
  * delivers `YUV_420_888`. Width and height are even; the chroma planes are half size each way.
+ * [timestampNs] is the sensor's start-of-exposure time (Camera2 SENSOR_TIMESTAMP), 0 if unknown.
  */
-class YuvFrame(val width: Int, val height: Int, val y: ByteArray, val u: ByteArray, val v: ByteArray) {
+class YuvFrame(
+    val width: Int, val height: Int, val y: ByteArray, val u: ByteArray, val v: ByteArray, val timestampNs: Long = 0L,
+) {
     init {
         require(width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0) { "frame must be even-sized" }
         require(y.size == width * height) { "luma plane size" }

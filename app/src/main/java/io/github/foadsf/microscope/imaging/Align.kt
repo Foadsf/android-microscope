@@ -12,12 +12,16 @@ import kotlin.math.sqrt
  * (Baker & Matthews 2004, "Lucas-Kanade 20 Years On"), with a Huber weight against outliers and a
  * brightness offset so small exposure differences do not bias the fit. The scale term absorbs
  * focus breathing in focus brackets; the rotation term absorbs hand roll in handheld bursts.
+ * [alignHomography] goes on to the full eight-parameter homography, the exact map between two
+ * views of a plane, for the tilted views of [PlaneParallax].
  */
 object Aligner {
     private const val MIN_SIDE = 48
     private const val SEARCH_RADIUS = 6
     private const val MAX_SAMPLES = 30_000 // ample for 4 parameters; error falls as 1/√N
     private const val HUBER_K = 12.0
+    private const val MAX_SAMPLES_HOMOGRAPHY = 60_000
+    private const val HOMOGRAPHY_MIN_SIDE = 128
 
     fun pyramid(luma: Plane): List<Plane> = gaussianPyramid(luma, maxLevels = 10, minSide = MIN_SIDE)
 
@@ -34,6 +38,27 @@ object Aligner {
             if (level > finest) w = w.fromLevel(1)
         }
         return w.fromLevel(finest)
+    }
+
+    /**
+     * Returns the homography H such that moving(H(x)) ≈ reference(x), with x in level-0 reference
+     * pixels: the exact map between two views of a plane. The coarse levels hold too few pixels to
+     * pin down eight parameters, so they run the similarity search and refinement of [align]; the
+     * levels at least [HOMOGRAPHY_MIN_SIDE] px across then refine all eight.
+     */
+    fun alignHomography(reference: List<Plane>, moving: List<Plane>, init: Affine = Affine.IDENTITY): Homography {
+        val top = minOf(reference.size, moving.size) - 1
+        val switchLevel = (0..top).lastOrNull { minOf(reference[it].width, reference[it].height) >= HOMOGRAPHY_MIN_SIDE } ?: 0
+        var w = coarseSearch(reference[top], moving[top], init.atLevel(top))
+        for (level in top downTo switchLevel + 1) {
+            w = refine(reference[level], moving[level], w, if (level == top) 30 else 10).fromLevel(1)
+        }
+        var hw = Homography.of(w)
+        for (level in switchLevel downTo 0) {
+            hw = refineHomography(reference[level], moving[level], hw, if (level == switchLevel) 30 else 15)
+            if (level > 0) hw = hw.fromLevel(1)
+        }
+        return hw
     }
 
     private fun coarseSearch(t: Plane, img: Plane, init: Affine): Affine {
@@ -81,37 +106,11 @@ object Aligner {
         val stride = max(1, sqrt(w.toDouble() * h / MAX_SAMPLES).toInt())
 
         // Steepest-descent images (∇T · ∂W/∂p at p = 0) on a sample grid of textured pixels.
-        var xs = IntArray(0)
-        var ys = IntArray(0)
-        var tv = FloatArray(0)
-        var sd = FloatArray(0)
-        for (threshold in floatArrayOf(1.0f, 0f)) {
-            val lx = ArrayList<Int>()
-            val ly = ArrayList<Int>()
-            var y = 2
-            while (y < h - 2) {
-                var x = 2
-                while (x < w - 2) {
-                    val gx = 0.5f * (t[x + 1, y] - t[x - 1, y])
-                    val gy = 0.5f * (t[x, y + 1] - t[x, y - 1])
-                    if (gx * gx + gy * gy > threshold * threshold) {
-                        lx.add(x)
-                        ly.add(y)
-                    }
-                    x += stride
-                }
-                y += stride
-            }
-            if (lx.size >= 500 || threshold == 0f) {
-                xs = lx.toIntArray()
-                ys = ly.toIntArray()
-                break
-            }
-        }
+        val (xs, ys) = texturedSamples(t, stride)
         val n = xs.size
         if (n < 32) return start
-        tv = FloatArray(n)
-        sd = FloatArray(4 * n)
+        val tv = FloatArray(n)
+        val sd = FloatArray(4 * n)
         for (i in 0 until n) {
             val x = xs[i]
             val y = ys[i]
@@ -174,25 +173,115 @@ object Aligner {
         return warp
     }
 
-    /** Solves the 4x4 system m * x = b with partial pivoting; null if singular. */
-    internal fun solve4(m: DoubleArray, b: DoubleArray): DoubleArray? {
-        val a = Array(4) { r -> DoubleArray(5) { c -> if (c < 4) m[r * 4 + c] else b[r] } }
-        for (col in 0 until 4) {
-            var piv = col
-            for (r in col + 1 until 4) if (abs(a[r][col]) > abs(a[piv][col])) piv = r
-            if (abs(a[piv][col]) < 1e-20) return null
-            val tmp = a[col]; a[col] = a[piv]; a[piv] = tmp
-            for (r in col + 1 until 4) {
-                val k = a[r][col] / a[col][col]
-                for (c in col until 5) a[r][c] -= k * a[col][c]
+    /**
+     * One pyramid level of inverse-compositional Lucas-Kanade with the eight-parameter warp of
+     * [Homography.normalisedWarp], in coordinates normalised to about ±1 so the perspective terms
+     * are conditioned like the others.
+     */
+    private fun refineHomography(t: Plane, img: Plane, start: Homography, iterations: Int): Homography {
+        val w = t.width
+        val h = t.height
+        val cx = (w - 1) / 2.0
+        val cy = (h - 1) / 2.0
+        val s = max(w, h) / 2.0
+        val stride = max(1, sqrt(w.toDouble() * h / MAX_SAMPLES_HOMOGRAPHY).toInt())
+        val (xs, ys) = texturedSamples(t, stride)
+        val n = xs.size
+        if (n < 64) return start
+        val tv = FloatArray(n)
+        val sd = FloatArray(8 * n)
+        for (i in 0 until n) {
+            val x = xs[i]
+            val y = ys[i]
+            // Gradient with respect to normalised coordinates.
+            val gx = 0.5f * (t[x + 1, y] - t[x - 1, y]) * s.toFloat()
+            val gy = 0.5f * (t[x, y + 1] - t[x, y - 1]) * s.toFloat()
+            val xn = ((x - cx) / s).toFloat()
+            val yn = ((y - cy) / s).toFloat()
+            tv[i] = t[x, y]
+            val o = 8 * i
+            sd[o] = gx * xn
+            sd[o + 1] = gy * xn
+            sd[o + 2] = gx * yn
+            sd[o + 3] = gy * yn
+            sd[o + 4] = gx
+            sd[o + 5] = gy
+            sd[o + 6] = -xn * (gx * xn + gy * yn)
+            sd[o + 7] = -yn * (gx * xn + gy * yn)
+        }
+
+        var warp = start
+        var bias = 0.0
+        val hess = DoubleArray(64)
+        val grad = DoubleArray(8)
+        val sw = DoubleArray(8)
+        repeat(iterations) {
+            hess.fill(0.0)
+            grad.fill(0.0)
+            var diffSum = 0.0
+            var used = 0
+            for (i in 0 until n) {
+                val x = xs[i].toDouble()
+                val y = ys[i].toDouble()
+                val u = warp.mapX(x, y)
+                val v = warp.mapY(x, y)
+                if (u < 0 || v < 0 || u > img.width - 1 || v > img.height - 1) continue
+                val diff = (img.sample(u.toFloat(), v.toFloat()) - tv[i]).toDouble()
+                val e = diff - bias
+                val rw = if (abs(e) <= HUBER_K) 1.0 else HUBER_K / abs(e)
+                val o = 8 * i
+                for (r in 0 until 8) sw[r] = sd[o + r].toDouble()
+                for (r in 0 until 8) {
+                    val wr = sw[r] * rw
+                    grad[r] += wr * e
+                    for (c in r until 8) hess[r * 8 + c] += wr * sw[c]
+                }
+                diffSum += diff
+                used++
             }
+            if (used < 64) return warp
+            bias = diffSum / used
+            for (r in 0 until 8) for (c in 0 until r) hess[r * 8 + c] = hess[c * 8 + r]
+            var trace = 0.0
+            for (r in 0 until 8) trace += hess[r * 9]
+            for (r in 0 until 8) hess[r * 9] += 1e-9 * trace + 1e-12
+            val dp = solveLinear(hess, grad, 8) ?: return warp
+            warp = warp.compose(Homography.normalisedWarp(dp, cx, cy, s).inverse()).normalized()
+            // Converged once no point of the frame moves by more than about 0.005 px.
+            var move = 0.0
+            for (r in 0 until 8) move = max(move, abs(dp[r]))
+            if (move * s < 5e-3) return warp
         }
-        val x = DoubleArray(4)
-        for (r in 3 downTo 0) {
-            var s = a[r][4]
-            for (c in r + 1 until 4) s -= a[r][c] * x[c]
-            x[r] = s / a[r][r]
-        }
-        return x
+        return warp
     }
+
+    /**
+     * Sample pixels for Lucas-Kanade on a [stride] grid: those with a gradient above 1 grey level,
+     * unless fewer than 500 qualify, in which case every grid pixel.
+     */
+    private fun texturedSamples(t: Plane, stride: Int): Pair<IntArray, IntArray> {
+        for (threshold in floatArrayOf(1.0f, 0f)) {
+            val lx = ArrayList<Int>()
+            val ly = ArrayList<Int>()
+            var y = 2
+            while (y < t.height - 2) {
+                var x = 2
+                while (x < t.width - 2) {
+                    val gx = 0.5f * (t[x + 1, y] - t[x - 1, y])
+                    val gy = 0.5f * (t[x, y + 1] - t[x, y - 1])
+                    if (gx * gx + gy * gy > threshold * threshold) {
+                        lx.add(x)
+                        ly.add(y)
+                    }
+                    x += stride
+                }
+                y += stride
+            }
+            if (lx.size >= 500 || threshold == 0f) return lx.toIntArray() to ly.toIntArray()
+        }
+        error("unreachable")
+    }
+
+    /** Solves the 4x4 system m * x = b with partial pivoting; null if singular. */
+    internal fun solve4(m: DoubleArray, b: DoubleArray): DoubleArray? = solveLinear(m, b, 4)
 }

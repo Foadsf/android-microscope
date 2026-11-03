@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.stream.IntStream
 
 /** What a press of the shutter produces. */
-enum class CaptureMode { PHOTO, SUPER_RES, FOCUS_STACK }
+enum class CaptureMode { PHOTO, SUPER_RES, FOCUS_STACK, TILT }
 
 /** Registration plus fusion for each [CaptureMode]. */
 object Pipeline {
@@ -25,7 +25,9 @@ object Pipeline {
             val scale = superResScale(frames[0].width * frames[0].height)
             SuperResolution.merge(frames, warps, scale, sharpen) { progress(0.3f + 0.7f * it) }
         }
-        else -> focusStack(frames, null, progress).image
+        mode == CaptureMode.FOCUS_STACK -> focusStack(frames, null, progress).image
+        // A tilt series is measured by [PlaneParallax]; its picture is the reference view.
+        else -> frames[0].toRgb().also { progress(1f) }
     }
 
     /** A fused focus stack, and the surface height map when the slices' focus settings are known. */
@@ -93,7 +95,7 @@ object Pipeline {
      * Runs [n] independent registrations on as many cores as memory allows: each needs one or two
      * float pyramids (≈ 5.4 bytes per pixel each) of a frame the size of [like].
      */
-    private fun <T> concurrently(n: Int, like: YuvFrame, task: (Int) -> T): List<T> {
+    internal fun <T> concurrently(n: Int, like: YuvFrame, task: (Int) -> T): List<T> {
         if (n <= 0) return emptyList()
         val perTask = 2L * like.width * like.height * 6
         val rt = Runtime.getRuntime()

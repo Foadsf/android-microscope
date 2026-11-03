@@ -5,7 +5,7 @@ comes from. The code lives in four packages:
 
 | Package | Contents | Android? |
 |---|---|---|
-| `imaging` | Pyramids, registration, super-resolution, focus stacking, optics | No: plain Kotlin, unit-tested on the JVM |
+| `imaging` | Pyramids, registration, super-resolution, focus stacking, surface height, multi-view geometry, optics | No: plain Kotlin, unit-tested on the JVM |
 | `camera` | Lens discovery, Camera2 session, frame copy | Yes |
 | `gl` | Live view renderer | Yes |
 | `ui` + root | Compose UI, view model, coordinate geometry, gallery | Yes |
@@ -112,6 +112,14 @@ bounded by available memory.
 
 The unit test recovers a known 1.2 % scale, 0.34° rotation and (7.3, −4.6) px shift to within
 0.1 px at every corner.
+
+For tilted views (Tilt mode) `Aligner.alignHomography` continues to the full **eight-parameter
+homography**, the exact map between two views of a plane. The coarse levels hold too few pixels to
+pin down eight parameters, so they run the similarity search and refinement above; the levels at
+least 128 px across then refine all eight by inverse-compositional Lucas-Kanade in coordinates
+normalised to about ±1, so the perspective terms are conditioned like the others. On a flat
+specimen seen from a 6° tilt it is within 0.006 px at every corner; the similarity model misses by
+1.5 px there.
 
 ## Super-resolution
 
@@ -229,6 +237,99 @@ coarse profilometer: it shows relief, warp and steps, not micrometre roughness.
   between frames, sparse edges produced false heights, just as they ghost the fused picture. Use a
   stand.
 
+## Surface height from tilted views
+
+Tilt mode measures the surface by **plane-plus-parallax** (Kumar, Anandan & Hanna 1994; Irani &
+Anandan 1996) from a square-on reference view and a few views tilted by hand about the specimen.
+Parallax resolves depth far more finely than focus does. Tilted 5°, a point 1 mm high moves by
+about 1 mm · sin 5° ≈ 87 µm sideways against the plane, 3.5 px at 24.6 µm per pixel (Note10, 80 mm).
+
+Every view k sees the specimen's mean plane through a homography, and every point off the plane
+through the same homography plus a parallax along the view's epipolar direction:
+
+```
+x_k ≃ H_k·x + γ·K·t_k / d       H_k = K·(R_k + (t_k / d)·nᵀ)·K⁻¹       γ = height / depth
+```
+
+1. **Registration.** Each view is registered to the reference with the eight-parameter homography.
+2. **Pose, without decomposition.** R_k comes from the gyroscope (integrated at 200 Hz and read at
+   the frame's exposure time; see below), and the plane normal n is taken as the reference optical
+   axis. Then `K⁻¹·H_k·K = λ·(R_k + t'·nᵀ)` is linear in the unknowns: the first two columns give
+   the scale λ, the third gives t' = t_k / d. Decomposing H alone has a twofold ambiguity, and in a
+   narrow field it cannot tell a pan from a sideways shift; the gyro settles both.
+3. **Gyro check.** How far λ·(the first two columns) misses R measures how well gyro and image
+   agree. The perspective row counts only as much as it moves the frame's corners, because a narrow
+   field hardly constrains it. A view that misses by more than 1.1° is dropped ("gyro and image
+   disagree"), and so is one whose baseline |t'ₓᵧ| is under 0.02, about 1.1° of tilt about the
+   specimen ("too little parallax"). Turning the phone about its own lens instead of about the
+   specimen gives no baseline at all.
+4. **Matching.** γ is found per grid cell by **multi-baseline** matching (Okutomi & Kanade 1993):
+   one γ predicts the cell's position in every view at once, and the cost over γ is the views' mean
+   1 − ZNCC over a 7 × 7 window (larger on coarse grids). It runs coarse to fine: a full search of
+   ±3 mm at the pyramid level where that is at most 4 px, then ±1.5 px around the level above,
+   each refined to a fraction of a step by a parabola. Between levels each cell takes the median of
+   its neighbours, so one bad match cannot steer the narrower search below. The grid is at most
+   0.25 MP, and frames above 4 MP are matched at half resolution.
+5. **Glare.** The phone's LED moves with it, so a specular highlight moves between views.
+   Saturated pixels and a 2 px margin are left out of every match, and at each γ the worst third of
+   the views (at least one) is dropped (Kang, Szeliski & Chai 2001), so a highlight in one or two
+   views does not pull the match.
+6. **Checks.** A cell is reported only if the kept views correlate at ZNCC ≥ 0.6, the cost has a
+   real minimum inside the search, at least half the views see it, and it agrees within 1.5 px of
+   parallax with the median of at least five matched neighbours.
+7. **Heights.** h = γ·d / (1 + γ), with d the working distance from the reported focus, reported
+   above the lowest point (1st percentile) like focus variation. K uses the image distance
+   v = u·f / (u − f), not f: close up the image plane sits 5 % behind the focal plane for a 4.3 mm
+   lens at 80 mm.
+
+Heights are relative to the plane the registration found, the specimen's dominant plane, so the
+specimen's tilt to the camera is removed. Outputs are the same as Stack mode's: a viridis picture,
+saved beside the reference view, and a PLY point cloud.
+
+**Capture.** The shutter takes the reference once the phone is steady, then exposure and white
+balance stay locked for the series. A guide shows the ring of tilts to visit (3–8°, in 4, 6 or 8
+sectors) and a dot for the current tilt from the gyroscope. A view is taken automatically when the
+dot is in an empty sector and the phone has been steady for 150 ms. The series ends when every
+sector is filled, or at a second press of the shutter (at least two tilted views are needed).
+Where the camera's frame timestamps share the gyroscope's clock (`SENSOR_INFO_TIMESTAMP_SOURCE`
+REALTIME), the orientation is read at the frame's exposure; otherwise a view is retaken if the
+phone turned by more than 0.17° during the capture.
+
+**Tests** render a relief by ray casting from known hand-tilted poses, as a Note10 main camera
+sees it at 80 mm: two bumps (+0.5 mm, −0.35 mm) and a ±0.1 mm ripple under band-limited texture,
+a 320 × 240 crop, six views at 4–7° around the ring. Each view has hand errors (pivot off the
+specimen by σ = 0.25 mm sideways and 0.5 mm along the axis, roll up to ±3°, exposure ±2 %), the
+gyro rotations carry 1 mrad of error per axis, and the sensor noise is σ = 1.5. Two views carry
+glare, one saturated. Errors are after removing the best-fitting plane, since the reference plane
+is a gauge:
+
+| Case | Height error (RMS) | Coverage |
+|---|---|---|
+| Relief (140 µm RMS) | 6.7 µm | 99.5 % |
+| Inside the glare | 7.1 µm (11.0 µm without glare rejection) | 100 % |
+| Flat specimen (negative control) | 3.8 µm of false relief | 98.7 % |
+
+Turning about the lens instead of the specimen, an inverted gyro and an untextured specimen all
+give no heights. For comparison, focus variation resolves 0.2 to 0.4 mm on the same phone.
+
+**Speed** on an 8-thread laptop JVM, reference plus six views: 4.2 s at 2.6 MP and 2.1 s at 12 MP
+(matched at half resolution).
+
+**Not yet verified on a real phone.** The emulator's fake camera has no parallax, so everything
+above is synthetic.
+
+- **The gyro axes.** Device axes are mapped to camera axes from `SENSOR_ORIENTATION`. If that is
+  wrong in the tilt axes, the relief comes out inverted, and in a narrow field the gyro check cannot
+  see it: images cannot tell a tilt from the opposite tilt, only the roll part shows (the test with
+  inverted rotations caught five of six views). Check with a known bump, such as a coin on paper,
+  which must come out raised.
+- **The height scale** rests on the reported focus distance and the thin-lens model, like the
+  lateral scale. Check it against a known step (a feeler gauge, a coin's thickness).
+- Gyro drift over a series, whether the Note10's frame timestamps are REALTIME, whether the Samsung
+  HAL keeps exposure locked across separate captures, real LED glare on metal, depth of field at
+  8° of tilt, and time and memory on the phone.
+- Whether the guide's dot moves the way the hand expects.
+
 ## Scale
 
 ```
@@ -263,6 +364,11 @@ on zoom or on screen size.
   *IEEE Trans. Image Processing* 16(2), 2007.
 - B. Wronski et al., "Handheld Multi-Frame Super-Resolution", *ACM Trans. Graphics* 38(4), 2019.
 - S. K. Nayar, Y. Nakagawa, "Shape from Focus", *IEEE Trans. PAMI* 16(8), 1994.
+- R. Kumar, P. Anandan, K. Hanna, "Direct recovery of shape from multiple views: a parallax based
+  approach", *ICPR* 1994.
+- M. Irani, P. Anandan, "Parallax geometry of pairs of points for 3D scene analysis", *ECCV* 1996.
+- M. Okutomi, T. Kanade, "A Multiple-Baseline Stereo", *IEEE Trans. PAMI* 15(4), 1993.
+- S. B. Kang, R. Szeliski, J. Chai, "Handling occlusions in dense multi-view stereo", *CVPR* 2001.
 - ISO 25178-606:2015, Geometrical product specifications — Surface texture: Areal — Part 606:
   Nominal characteristics of non-contact (focus variation) instruments.
 - S. W. Hasinoff et al., "Burst photography for high dynamic range and low-light imaging on mobile

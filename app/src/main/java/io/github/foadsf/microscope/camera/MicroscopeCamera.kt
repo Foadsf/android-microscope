@@ -87,6 +87,8 @@ class MicroscopeCamera(context: Context) {
     private var lens: Lens? = null
     private var controls: Controls? = null
     private var exposureLocked = false
+    /** Exposure and white balance stay locked between captures too (a tilt series). */
+    private var exposureHeld = false
 
     private val telemetryState = MutableStateFlow(Telemetry())
     val telemetry: StateFlow<Telemetry> = telemetryState
@@ -244,7 +246,19 @@ class MicroscopeCamera(context: Context) {
         } finally {
             ir.setOnImageAvailableListener(null, null)
             frames.close()
-            exposureLocked = false
+            exposureLocked = exposureHeld
+            startPreview()
+        }
+    }
+
+    /**
+     * Locks (or releases) exposure and white balance across captures, so a series of separate
+     * captures, such as the views of a tilt series, share one exposure.
+     */
+    fun holdExposure(hold: Boolean) {
+        handler.post {
+            exposureHeld = hold
+            exposureLocked = hold
             startPreview()
         }
     }

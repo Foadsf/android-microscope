@@ -26,7 +26,7 @@ internal fun copyRoi(img: Image, roi: Rect): YuvFrame {
     }
     copyChroma(img.planes[1], roi, cw, ch, u)
     copyChroma(img.planes[2], roi, cw, ch, v)
-    return YuvFrame(w, h, y, u, v)
+    return YuvFrame(w, h, y, u, v, img.timestamp)
 }
 
 private fun copyChroma(plane: Image.Plane, roi: Rect, cw: Int, ch: Int, out: ByteArray) {

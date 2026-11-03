@@ -40,6 +40,7 @@ object Diagnostics {
         appendLine("  manual focus ${yes(l.manualFocus)}, tap AF ${yes(l.afAuto)}, OIS ${yes(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON in l.oisModes)}")
         val crop = if (l.centerOnlyCrop) "centre only" else "freeform"
         appendLine("  hardware level ${level(l.hardwareLevel)}, crop $crop, max ISP zoom ${fmt(l.maxDigitalZoom, 1)}×")
+        appendLine("  sensor orientation ${l.sensorOrientation}°, frame clock shared with gyroscope ${yes(l.realtimeTimestamps)}")
         appendLine("  capabilities: ${l.capabilities.joinToString(", ") { capability(it) }}")
         val torch = when {
             !l.hasFlash -> "no flash"

@@ -85,6 +85,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.foadsf.microscope.MicroscopeViewModel
+import io.github.foadsf.microscope.TiltState
 import io.github.foadsf.microscope.TorchMode
 import io.github.foadsf.microscope.UiState
 import io.github.foadsf.microscope.gl.Filter
@@ -127,7 +128,7 @@ private fun Viewfinder(s: UiState, vm: MicroscopeViewModel) {
     val aspect = g?.uprightAspect ?: 0.75f
     var tap by remember { mutableStateOf<Offset?>(null) }
     var calibrating by remember { mutableStateOf(false) }
-    val busy = s.processing != null
+    val busy = s.locked
 
     Box(
         Modifier
@@ -154,6 +155,7 @@ private fun Viewfinder(s: UiState, vm: MicroscopeViewModel) {
         CameraSurface(s, vm)
         Overlay(s)
         if (s.measuring) RulerOverlay(s, vm)
+        s.tilt?.let { TiltOverlay(it, s.lens?.sensorOrientation ?: 90) }
         tap?.let { FocusReticle(it) { tap = null } }
         TopBar(s, vm)
         TorchLevel(s, vm)
@@ -338,8 +340,8 @@ private fun Controls(s: UiState, vm: MicroscopeViewModel) {
         Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        FocusControl(s, vm, enabled = !busy)
-        ZoomControl(s, vm, enabled = !busy)
+        FocusControl(s, vm, enabled = !s.locked)
+        ZoomControl(s, vm, enabled = !s.locked)
         Spacer(Modifier.height(2.dp))
         ModeTabs(s, vm, enabled = !busy)
         Spacer(Modifier.height(6.dp))
@@ -417,8 +419,9 @@ private fun SliderRow(
 @Composable
 private fun ModeTabs(s: UiState, vm: MicroscopeViewModel, enabled: Boolean) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(horizontalArrangement = Arrangement.spacedBy(26.dp)) {
-            for ((mode, name) in listOf(CaptureMode.PHOTO to "PHOTO", CaptureMode.SUPER_RES to "SUPER-RES", CaptureMode.FOCUS_STACK to "STACK")) {
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            val modes = listOf(CaptureMode.PHOTO to "PHOTO", CaptureMode.SUPER_RES to "SUPER-RES", CaptureMode.FOCUS_STACK to "STACK", CaptureMode.TILT to "TILT")
+            for ((mode, name) in modes) {
                 val selected = s.mode == mode
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -433,12 +436,12 @@ private fun ModeTabs(s: UiState, vm: MicroscopeViewModel, enabled: Boolean) {
             }
         }
         Spacer(Modifier.height(6.dp))
-        val caption = s.processing?.label ?: modeCaption(s, vm)
+        val caption = s.processing?.label ?: s.tilt?.let { tiltCaption(it) } ?: modeCaption(s, vm)
         Text(
             caption,
-            style = Type.Small.copy(color = if (s.processing != null) Palette.Accent else Palette.TextDim),
+            style = Type.Small.copy(color = if (s.processing != null || s.tilt != null) Palette.Accent else Palette.TextDim),
             modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                .clickable(enabled = enabled && s.mode != CaptureMode.PHOTO) { vm.cycleFrames() }
+                .clickable(enabled = enabled && s.mode != CaptureMode.PHOTO && s.tilt == null) { vm.cycleFrames() }
                 .padding(horizontal = 8.dp, vertical = 3.dp),
         )
     }
@@ -461,6 +464,48 @@ private fun modeCaption(s: UiState, vm: MicroscopeViewModel): String = when (s.m
         }
         val height = if (lens != null && lens.manualFocus && lens.focusIsMetric) " + height map" else ""
         "${s.stackFrames} slices$depth$height  ⟳"
+    }
+    CaptureMode.TILT -> "Square view + ${s.tiltViews} tilted · height map  ⟳"
+}
+
+private fun tiltCaption(t: TiltState): String = when {
+    t.capturing -> "Hold still…"
+    !t.referenceTaken -> "Hold the phone square to the specimen"
+    else -> "%d / %d views · tilt %.1f° · tilt %.0f–%.0f° about the specimen; shutter ends".format(
+        t.filled.count { it }, t.filled.size, t.tiltDeg, t.minDeg, t.maxDeg,
+    )
+}
+
+/**
+ * The tilt guide: the ring of tilts to visit (one sector per view, filled once captured) and a dot
+ * for the phone's current tilt, both turned like the live view.
+ */
+@Composable
+private fun TiltOverlay(t: TiltState, sensorOrientation: Int) {
+    Canvas(Modifier.fillMaxSize()) {
+        val c = Offset(size.width / 2, size.height / 2)
+        val full = 0.36f * size.minDimension
+        val showDeg = t.maxDeg + 2f
+        val r0 = full * t.minDeg / showDeg
+        val r1 = full * t.maxDeg / showDeg
+        val mid = (r0 + r1) / 2
+        val n = t.filled.size
+        val sweep = 360f / n
+        for (b in 0 until n) {
+            drawArc(
+                if (t.filled[b]) Palette.Accent.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.16f),
+                startAngle = b * sweep + sensorOrientation + 2f, sweepAngle = sweep - 4f, useCenter = false,
+                topLeft = Offset(c.x - mid, c.y - mid), size = Size(2 * mid, 2 * mid), style = Stroke(r1 - r0),
+            )
+        }
+        if (t.referenceTaken) {
+            val a = t.direction + Math.toRadians(sensorOrientation.toDouble()).toFloat()
+            val r = (full * t.tiltDeg / showDeg).coerceAtMost(full * 1.1f)
+            val dot = Offset(c.x + r * kotlin.math.cos(a), c.y + r * kotlin.math.sin(a))
+            val inRing = t.tiltDeg in t.minDeg..t.maxDeg
+            drawCircle(Palette.Scrim, 11.dp.toPx(), dot)
+            drawCircle(if (inRing && t.steady) Palette.Accent else if (inRing) Palette.Warn else Palette.Text, 8.dp.toPx(), dot)
+        }
     }
 }
 
@@ -487,7 +532,7 @@ private fun ShutterRow(s: UiState, vm: MicroscopeViewModel) {
         val lens = s.lens
         Box(
             Modifier.size(52.dp).clip(CircleShape).background(Palette.SurfaceHigh).border(1.dp, Palette.Outline, CircleShape)
-                .clickable(enabled = s.lenses.size > 1 && s.processing == null) { vm.nextLens() }
+                .clickable(enabled = s.lenses.size > 1 && !s.locked) { vm.nextLens() }
                 .semantics { contentDescription = "Switch lens, now ${lens?.label}" },
             contentAlignment = Alignment.Center,
         ) {
@@ -506,7 +551,7 @@ private fun Shutter(s: UiState, vm: MicroscopeViewModel) {
     val ready = s.streams != null && p == null
     Box(
         Modifier.size(78.dp).clip(CircleShape).clickable(enabled = ready, role = Role.Button) { vm.shutter() }
-            .semantics { contentDescription = "Capture" },
+            .semantics { contentDescription = if (s.tilt != null) "Finish tilt series" else "Capture" },
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.fillMaxSize()) {
@@ -520,7 +565,16 @@ private fun Shutter(s: UiState, vm: MicroscopeViewModel) {
                 )
             }
             val inner = size.minDimension / 2 - 8.dp.toPx()
-            drawCircle(if (p != null) Palette.AccentDim else if (ready) Palette.Text else Palette.Outline, inner)
+            if (s.tilt != null) {
+                // A tilt series is running: the shutter ends it.
+                val half = inner * 0.55f
+                drawRoundRect(
+                    Palette.Accent, topLeft = Offset(size.width / 2 - half, size.height / 2 - half), size = Size(2 * half, 2 * half),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(half / 4, half / 4),
+                )
+            } else {
+                drawCircle(if (p != null) Palette.AccentDim else if (ready) Palette.Text else Palette.Outline, inner)
+            }
         }
     }
 }

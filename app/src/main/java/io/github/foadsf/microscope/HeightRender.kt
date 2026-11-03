@@ -69,11 +69,11 @@ object HeightRender {
      * Binary PLY point cloud, in mm: x right, y up, z the height; coloured from [colours] (the fused
      * picture, same orientation as [map]). Unknown cells are left out.
      */
-    fun ply(map: HeightMap, colours: RgbImage, umPerCell: Float): ByteArray {
+    fun ply(map: HeightMap, colours: RgbImage, umPerCell: Float, method: String = "focus variation"): ByteArray {
         val points = map.validCount
         val header = buildString {
             append("ply\nformat binary_little_endian 1.0\n")
-            append("comment Microscope: surface height by focus variation; units mm\n")
+            append("comment Microscope: surface height by $method; units mm\n")
             append("element vertex $points\n")
             append("property float x\nproperty float y\nproperty float z\n")
             append("property uchar red\nproperty uchar green\nproperty uchar blue\n")

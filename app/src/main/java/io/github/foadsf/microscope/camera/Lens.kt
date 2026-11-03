@@ -52,6 +52,8 @@ data class Lens(
     /** Exposure compensation range in steps of [evStep] stops; 0..0 when the HAL has none. */
     val evRange: IntRange,
     val evStep: Float,
+    /** Frame timestamps share the clock of sensor events (SENSOR_INFO_TIMESTAMP_SOURCE REALTIME). */
+    val realtimeTimestamps: Boolean,
 ) {
     val key get() = "$openId/${physicalId ?: ""}"
 
@@ -149,6 +151,8 @@ object LensCatalog {
             oisModes = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty(),
             evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)?.let { it.lower..it.upper } ?: 0..0,
             evStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f,
+            realtimeTimestamps = c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+                CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME,
         )
     }
 

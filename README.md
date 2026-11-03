@@ -1,7 +1,7 @@
 # Microscope
 
 A free Android app that turns a phone's rear cameras into a close-up inspection tool: manual focus
-in millimetres, deep zoom, focus peaking, an approximate scale bar, and two computational capture
+in millimetres, deep zoom, focus peaking, an approximate scale bar, and three computational capture
 modes that do more than one frame can.
 
 - **Live view on the GPU:** sharpening, focus peaking, and colour, mono or edge (dark-field-like)
@@ -22,6 +22,10 @@ modes that do more than one frame can.
 - **Surface height** from the same stack, by focus variation: a colour height map beside the
   picture, and a point cloud (`.ply`, in mm) in *Documents/Microscope* for CloudCompare, MeshLab
   or FreeCAD. Height resolution is about a tenth of a slice, roughly 0.2 to 0.5 mm on a Note10.
+- **Fine relief from tilted views** (Tilt mode, experimental): a square-on view plus a few views
+  tilted 3–8° by hand, guided by the gyroscope, give the same height map and point cloud by
+  parallax. In synthetic tests it is accurate to about 7 µm; it has not yet been checked on a real
+  phone.
 - **Every lens the phone exposes.** Lenses are ranked by how small a specimen pixel they can
   resolve at closest focus, and the best one opens first.
 - **Torch:** off, on, or auto (turns on when the scene is dark). The aperture switches too on
@@ -51,6 +55,11 @@ checked against, a Galaxy Note10 (SM-N970F).
    - **Stack:** use a stand. The caption shows how deep the stack reaches. It also saves the
      surface height map and point cloud. Areas without texture, and areas that moved between
      slices, are left unknown (dark grey) rather than guessed.
+   - **Tilt:** hold the phone by hand, square to the specimen, and press the shutter for the
+     reference. Then tilt the phone **about the specimen**, keeping it centred, until the dot
+     enters an empty sector of the ring; hold still and the view is taken. Visit every sector, or
+     press the shutter again to finish with what you have (at least two). Focus, zoom and exposure
+     stay fixed for the series. Tap the caption for 4, 6 or 8 views.
 
 The scale bar and the "WD"/"FOV" readout come from thin-lens optics and the focus distance the
 camera reports. They are **approximate** (±10 % or worse), and are hidden on phones that report
@@ -73,6 +82,7 @@ short:
 | Super-resolution | Forward-mapped samples, two-scale first-order kernel regression (Takeda, Farsiu & Milanfar 2007) with edge-steered kernels (Wronski et al. 2019), robust weights against motion |
 | Focus stacking | Laplacian-pyramid fusion (Burt & Adelson 1983) with energy-weighted coefficients, tiled across all cores |
 | Surface height | Focus variation / shape from focus (Nayar & Nakagawa 1994; ISO 25178-606): modified-Laplacian focus curves, Gaussian peak interpolation |
+| Relief from tilted views | Eight-parameter homography registration, pose from homography plus gyroscope, plane-plus-parallax (Kumar, Anandan & Hanna 1994) by multi-baseline ZNCC matching (Okutomi & Kanade 1993) with glare-robust view trimming |
 | Live view | OpenGL ES 3 external-texture shader: unsharp mask, Sobel peaking, clipping zebra |
 
 The imaging code (`app/src/main/java/.../imaging`) is plain Kotlin with no Android dependencies.
@@ -151,9 +161,12 @@ commit a signing key here.**
   noise reduction is the dependable part. On a stand there is no motion to exploit.
 - **Speed.** Fusion runs on all CPU cores in Kotlin. Measured on an 8-thread laptop JVM: a 9-frame
   stack of 2.6 MP takes 5 to 6 s, and a 2× super-resolution merge of an 8-frame 2.6 MP burst
-  takes 9 to 10 s (alignment included). A phone will be somewhat slower. Zoom in to process a smaller area faster.
+  takes 9 to 10 s (alignment included); a tilt series of 1 + 6 views takes 2 to 4 s. A phone will be somewhat slower. Zoom in to process a smaller area faster.
 - **The NPU is not used.** There is no trained model worth shipping, and Android's NNAPI is
   deprecated. The GPU runs the live view; the CPU runs the fusion.
+- **Tilt mode is unverified on a phone.** Its accuracy comes from synthetic tests; the gyroscope
+  axis mapping and the height scale still need checking against a known bump and a known step (see
+  [DESIGN.md](docs/DESIGN.md#surface-height-from-tilted-views)).
 - **Portrait only.** The sensor-to-screen mapping assumes it.
 
 ## Contributing

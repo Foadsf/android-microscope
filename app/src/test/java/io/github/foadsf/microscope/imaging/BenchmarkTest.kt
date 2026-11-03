@@ -37,6 +37,19 @@ class BenchmarkTest {
             time("merge 8 @ ${w}x$h scale $scale") { SuperResolution.merge(burst, warps, scale, 0.5f) }
             if (scale == 2) time("merge 8 @ ${w}x$h unsteered") { SuperResolution.merge(burst, warps, scale, 0.5f, steer = 0f) }
             if (scale == 2) time("merge 8 @ ${w}x$h steered, warm") { SuperResolution.merge(burst, warps, scale, 0.5f) }
+            // Timing only: views that are the reference shifted by 3 % of f with no rotation read as
+            // a sideways baseline over a flat specimen, so every stage runs on every view.
+            val k = Intrinsics.focused(4.3, 1.4 * 4032 / w, 80.0, (w - 1) / 2.0, (h - 1) / 2.0)
+            val ref = f[0]
+            val views = listOf(ref) + (0 until 6).map { i ->
+                val dx = (0.03 * k.f * kotlin.math.cos(i * Math.PI / 3)).toInt()
+                val dy = (0.03 * k.f * kotlin.math.sin(i * Math.PI / 3)).toInt()
+                val y = ByteArray(w * h) { p -> ref.y[(p / w + dy).coerceIn(0, h - 1) * w + (p % w + dx).coerceIn(0, w - 1)] }
+                YuvFrame(w, h, y, ref.u, ref.v)
+            }
+            val still = List(7) { Rotations.IDENTITY }
+            val r = time("tilt 1 + 6 @ ${w}x$h") { PlaneParallax.estimate(views, still, k, 80.0) }
+            println("  tilt views used: ${r.views.count { it.used }}, grid ${r.height.width}x${r.height.height}")
         }
     }
 }

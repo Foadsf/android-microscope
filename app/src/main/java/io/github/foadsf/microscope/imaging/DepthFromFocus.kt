@@ -4,7 +4,8 @@ import kotlin.math.ln
 
 /**
  * Surface heights on a regular grid, in mm, NaN where unknown. One grid cell covers [step] × [step]
- * pixels of the reference frame. [index] is the fractional bracket slice each height came from.
+ * pixels of the reference frame. [index] is what each height was read from: the fractional bracket
+ * slice for [DepthFromFocus], γ = height / depth for [PlaneParallax].
  */
 class HeightMap(val width: Int, val height: Int, val step: Int, val mm: FloatArray, val index: FloatArray) {
     init {
