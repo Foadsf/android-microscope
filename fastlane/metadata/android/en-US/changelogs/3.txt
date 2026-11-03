@@ -1,0 +1,1 @@
+Surface height: Stack mode also saves a height map and a 3D point cloud (focus variation). New Tilt mode measures finer relief from a few hand-tilted views. Phones with 50-200 MP cameras use the binned 12 MP mode, and a capture that would run out of memory is retaken at half resolution instead of failing.
