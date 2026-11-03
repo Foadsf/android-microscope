@@ -28,6 +28,34 @@ class YuvFrame(
     fun lumaPlane(): Plane = Plane(width, height, FloatArray(y.size) { (y[it].toInt() and 0xFF).toFloat() })
     fun uPlane(): Plane = Plane(chromaWidth, chromaHeight, FloatArray(u.size) { (u[it].toInt() and 0xFF).toFloat() })
     fun vPlane(): Plane = Plane(chromaWidth, chromaHeight, FloatArray(v.size) { (v[it].toInt() and 0xFF).toFloat() })
+
+    /**
+     * This frame with every [factor] × [factor] block averaged into one pixel (luma and chroma
+     * alike), trimmed to even size: the same field at lower resolution, and less noise per pixel.
+     */
+    fun binned(factor: Int): YuvFrame {
+        require(factor >= 1)
+        if (factor == 1) return this
+        val w2 = (width / factor) and -2
+        val h2 = (height / factor) and -2
+        require(w2 >= 2 && h2 >= 2) { "frame too small to bin by $factor" }
+        fun bin(src: ByteArray, sw: Int, dw: Int, dh: Int): ByteArray {
+            val out = ByteArray(dw * dh)
+            val n = factor * factor
+            for (y2 in 0 until dh) for (x2 in 0 until dw) {
+                var sum = 0
+                for (j in 0 until factor) {
+                    val row = (y2 * factor + j) * sw + x2 * factor
+                    for (i in 0 until factor) sum += src[row + i].toInt() and 0xFF
+                }
+                out[y2 * dw + x2] = ((sum + n / 2) / n).toByte()
+            }
+            return out
+        }
+        return YuvFrame(
+            w2, h2, bin(y, width, w2, h2), bin(u, chromaWidth, w2 / 2, h2 / 2), bin(v, chromaWidth, w2 / 2, h2 / 2), timestampNs,
+        )
+    }
 }
 
 /** A single-channel float image, row-major. Values are on the 0..255 scale. */

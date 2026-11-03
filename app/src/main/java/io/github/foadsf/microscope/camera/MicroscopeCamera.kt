@@ -69,8 +69,11 @@ class MicroscopeCamera(context: Context) {
 
     data class Streams(val lens: Lens, val previewSize: Size, val captureSize: Size)
 
-    /** One computational capture: a focus distance per frame, and the crop to keep. */
-    class CaptureSpec(val focus: FloatArray, val burst: Boolean, val roi: Rect, val highQuality: Boolean)
+    /**
+     * One computational capture: a focus distance per frame, the crop to keep, and [bin], the
+     * block size each frame is averaged down by when the full resolution would not fit in memory.
+     */
+    class CaptureSpec(val focus: FloatArray, val burst: Boolean, val roi: Rect, val highQuality: Boolean, val bin: Int = 1)
 
     private val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val thread = HandlerThread("camera").apply { start() }
@@ -206,7 +209,7 @@ class MicroscopeCamera(context: Context) {
         ir.setOnImageAvailableListener({ r ->
             val img = r.acquireNextImage() ?: return@setOnImageAvailableListener
             try {
-                frames.trySend(copyRoi(img, spec.roi))
+                frames.trySend(copyRoi(img, spec.roi).binned(spec.bin))
             } catch (t: Throwable) {
                 frames.close(t)
             } finally {

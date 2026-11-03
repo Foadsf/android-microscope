@@ -408,17 +408,37 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
             if (s.tilt == null) startTilt() else tiltFinish = true
             return
         }
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            // A large sensor at low zoom may not fit in memory at full resolution: then capture
+            // again with every 2 × 2 block averaged (same field, half the resolution).
+            for (bin in intArrayOf(1, 2, 4)) {
+                try {
+                    capture(app, s, g, streams, bin)
+                    return@launch
+                } catch (e: OutOfMemoryError) {
+                    Log.w(TAG, "out of memory at bin $bin")
+                    if (bin == 4) note("Not enough memory: zoom in to capture a smaller area")
+                } finally {
+                    state.update { it.copy(processing = null) }
+                }
+            }
+        }
+    }
+
+    private suspend fun capture(app: Application, s: UiState, g: Geometry, streams: MicroscopeCamera.Streams, bin: Int) {
+        val mode = s.mode
         val n = s.frames
         val spec = MicroscopeCamera.CaptureSpec(
             focus = if (mode == CaptureMode.FOCUS_STACK) stackPlan(s) else FloatArray(n) { s.focus },
             burst = mode != CaptureMode.FOCUS_STACK,
             roi = g.captureRoi(streams.captureSize),
             highQuality = mode != CaptureMode.SUPER_RES,
+            bin = bin,
         )
-        val roiPixels = spec.roi.width() * spec.roi.height()
+        val roiPixels = spec.roi.width() / bin * (spec.roi.height() / bin)
         val scale = if (mode == CaptureMode.SUPER_RES) Pipeline.superResScale(roiPixels) else 1
-        val app = getApplication<Application>()
-        viewModelScope.launch {
+        run {
             try {
                 // Let the jolt of pressing the shutter die away before exposing.
                 progress("Hold still", 0f)
@@ -453,7 +473,7 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 Log.i(TAG, "$mode: ${frames.size} x ${spec.roi.width()}x${spec.roi.height()} -> ${rgb.width}x${rgb.height} in ${(System.nanoTime() - t0) / 1_000_000} ms")
                 progress("Saving", 0.95f)
-                val umPerOut = s.umPerSensorPixel?.let { it * g.lens.activeArray.width() / streams.captureSize.width / scale }
+                val umPerOut = s.umPerSensorPixel?.let { it * g.lens.activeArray.width() / streams.captureSize.width * bin / scale }
                 val meta = CaptureMeta(
                     description = describe(mode, frames.size, umPerOut, s.scale?.calibrated == true, s),
                     focalMm = g.lens.focalMm,
@@ -463,10 +483,9 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                     umPerPixel = umPerOut,
                 )
                 store(app, rgb, height, meta, umPerOut, "focus variation")
+                if (bin > 1) note("Saved at 1/$bin resolution to fit in memory; zoom in for full detail")
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: OutOfMemoryError) {
-                note("Not enough memory: zoom in to capture a smaller area")
             } catch (e: Exception) {
                 Log.e(TAG, "capture failed", e)
                 note("Capture failed: ${e.message}")

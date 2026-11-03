@@ -423,4 +423,33 @@ class ImagingTest {
         println("focus variation on pure noise: %.2f %% of cells reported".format(100.0 * nm.validCount / (nm.width * nm.height)))
         assertTrue("noise gave ${nm.validCount} of ${nm.width * nm.height} heights", nm.validCount < 0.02 * nm.width * nm.height)
     }
+
+    @Test
+    fun binningKeepsTheFieldAndHalvesTheNoise() {
+        val w = 402
+        val h = 300
+        val r = Random(17)
+        // A vertical edge at x = 200 on noise of σ = 8, with a chroma step at the same place.
+        val y = ByteArray(w * h) { i -> ((if (i % w < 200) 60 else 180) + r.nextGaussian() * 8).toInt().coerceIn(0, 255).toByte() }
+        val u = ByteArray(w * h / 4) { i -> (if (i % (w / 2) < 100) 100 else 160).toByte() }
+        val f = YuvFrame(w, h, y, u, u.copyOf(), timestampNs = 42L)
+        val b = f.binned(2)
+        assertEquals(200, b.width) // 402 / 2 = 201, trimmed to even
+        assertEquals(150, b.height)
+        assertEquals(42L, b.timestampNs)
+        // The edge lands at x = 100 in the binned frame, and chroma follows it.
+        assertEquals(60.0, (0 until b.height).map { b.y[it * b.width + 90].toInt() and 0xFF }.average(), 2.0)
+        assertEquals(180.0, (0 until b.height).map { b.y[it * b.width + 110].toInt() and 0xFF }.average(), 2.0)
+        assertEquals(100, b.u[10 * b.chromaWidth + 45].toInt() and 0xFF)
+        assertEquals(160, b.u[10 * b.chromaWidth + 55].toInt() and 0xFF)
+        // Averaging 4 pixels halves the noise.
+        fun sd(fr: YuvFrame, x0: Int, x1: Int): Double {
+            val v = (0 until fr.height).flatMap { yy -> (x0 until x1).map { xx -> (fr.y[yy * fr.width + xx].toInt() and 0xFF).toDouble() } }
+            val m = v.average()
+            return sqrt(v.sumOf { (it - m) * (it - m) } / v.size)
+        }
+        val ratio = sd(b, 10, 90) / sd(f, 20, 180)
+        assertTrue("noise ratio $ratio", ratio in 0.45..0.58)
+        assertTrue(f.binned(1) === f)
+    }
 }

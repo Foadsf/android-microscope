@@ -157,14 +157,22 @@ object LensCatalog {
     }
 
     /**
-     * YUV sizes worth trying for the capture stream, best first: the four largest, then the
-     * largest few at or below preview size, which every hardware level guarantees alongside a
-     * preview stream.
+     * Largest capture stream worth having. Quad-, nona- and 16-cell sensors (48 to 200 MP) may list
+     * their full-resolution, remosaiced sizes beside the binned 12 MP-class one. The binned output
+     * has less noise per pixel, and a burst at full size would not fit in the app's memory.
+     */
+    const val MAX_CAPTURE_PIXELS = 16_800_000L
+
+    /**
+     * YUV sizes worth trying for the capture stream, best first: the four largest up to
+     * [MAX_CAPTURE_PIXELS] (larger ones only if nothing smaller is offered), then the largest few
+     * at or below preview size, which every hardware level guarantees alongside a preview stream.
      */
     fun captureCandidates(lens: Lens): List<Size> {
         val all = matchingAspect(lens.yuvSizes, lens.activeArray)
+        val capped = all.filter { it.width.toLong() * it.height <= MAX_CAPTURE_PIXELS }.ifEmpty { all }
         val small = all.filter { it.width.toLong() * it.height <= 1920L * 1440 }
-        return (all.take(4) + small.take(3)).distinct()
+        return (capped.take(4) + small.take(3)).distinct()
     }
 
     /** Output sizes with the active array's aspect ratio, largest first. */
