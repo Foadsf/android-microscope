@@ -4,8 +4,8 @@ A free Android app that turns a phone's rear cameras into a close-up inspection 
 in millimetres, deep zoom, focus peaking, an approximate scale bar, and three computational capture
 modes that do more than one frame can.
 
-- **Live view on the GPU:** sharpening, focus peaking, and colour, mono or edge (dark-field-like)
-  rendering, in one OpenGL ES 3 pass.
+- **Live view on the GPU:** sharpening, focus peaking, and colour, mono, edge (dark-field-like) or
+  relief (oblique-light) rendering, in one OpenGL ES 3 pass.
 - **Exposure compensation** with a zebra that stripes clipped highlights, for shiny metal and
   solder.
 - **Measuring:** drag a line across the specimen to read its length. Calibrate once against a
@@ -20,8 +20,9 @@ modes that do more than one frame can.
 - **Focus stacking:** 5, 9 or 15 frames bracketed around your focus, one depth of field apart,
   fused into a single all-in-focus picture.
 - **Surface height** from the same stack, by focus variation: a colour height map beside the
-  picture, and a point cloud (`.ply`, in mm) in *Documents/Microscope* for CloudCompare, MeshLab
-  or FreeCAD. Height resolution is about a tenth of a slice, roughly 0.2 to 0.5 mm on a Note10.
+  picture, a point cloud (`.ply`, in mm) for CloudCompare, MeshLab or FreeCAD, and a Gwyddion
+  file (`.gsf`), both in *Documents/Microscope*, plus Sa/Sq/Sz/Ssk/Sku in the picture's
+  description. Height resolution is about a tenth of a slice, roughly 0.2 to 0.5 mm on a Note10.
 - **Fine relief from tilted views** (Tilt mode, experimental): a square-on view plus a few views
   tilted 3–8° by hand, guided by the gyroscope, give the same height map and point cloud by
   parallax. In synthetic tests it is accurate to about 7 µm; it has not yet been checked on a real

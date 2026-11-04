@@ -252,7 +252,7 @@ object PlaneParallax {
             val g = gamma[i].toDouble()
             heights[i] = (g * distanceMm / (1 + g)).toFloat()
         }
-        val sorted = heights.filter { !it.isNaN() }.sorted()
+        val sorted = heights.finiteSorted()
         val index = FloatArray(gw * gh) { Float.NaN }
         if (sorted.isNotEmpty()) {
             val base = sorted[((sorted.size - 1) * 0.01f).toInt()]

@@ -14,7 +14,9 @@ import io.github.foadsf.microscope.camera.Lens
 import io.github.foadsf.microscope.camera.LensCatalog
 import io.github.foadsf.microscope.camera.MicroscopeCamera
 import io.github.foadsf.microscope.gl.Filter
+import io.github.foadsf.microscope.imaging.AreaParameters
 import io.github.foadsf.microscope.imaging.Calibration
+import io.github.foadsf.microscope.imaging.Gsf
 import io.github.foadsf.microscope.imaging.CaptureMode
 import io.github.foadsf.microscope.imaging.HeightMap
 import io.github.foadsf.microscope.imaging.Intrinsics
@@ -154,6 +156,9 @@ data class UiState(
     /** Focus, zoom, pan and lens are fixed while a capture is processed or a tilt series runs. */
     val locked: Boolean get() = processing != null || tilt != null
 }
+
+/** True if this or any of its causes is an OutOfMemoryError (parallel streams may wrap it). */
+internal fun Throwable.isOutOfMemory(): Boolean = generateSequence(this) { it.cause }.take(8).any { it is OutOfMemoryError }
 
 class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
     private val camera = MicroscopeCamera(app)
@@ -410,68 +415,100 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
         }
         val app = getApplication<Application>()
         viewModelScope.launch {
-            // A large sensor at low zoom may not fit in memory at full resolution: then capture
-            // again with every 2 × 2 block averaged (same field, half the resolution).
-            for (bin in intArrayOf(1, 2, 4)) {
-                try {
-                    capture(app, s, g, streams, bin)
-                    return@launch
-                } catch (e: OutOfMemoryError) {
-                    Log.w(TAG, "out of memory at bin $bin")
-                    if (bin == 4) note("Not enough memory: zoom in to capture a smaller area")
-                } finally {
-                    state.update { it.copy(processing = null) }
+            try {
+                val (spec, frames) = acquire(app, s, g, streams)
+                develop(app, s, g, streams, spec, frames)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e.isOutOfMemory()) {
+                    note("Not enough memory: zoom in to capture a smaller area")
+                } else {
+                    Log.e(TAG, "capture failed", e)
+                    note("Capture failed: ${e.message}")
                 }
+            } finally {
+                state.update { it.copy(processing = null) }
             }
         }
     }
 
-    private suspend fun capture(app: Application, s: UiState, g: Geometry, streams: MicroscopeCamera.Streams, bin: Int) {
-        val mode = s.mode
-        val n = s.frames
-        val spec = MicroscopeCamera.CaptureSpec(
-            focus = if (mode == CaptureMode.FOCUS_STACK) stackPlan(s) else FloatArray(n) { s.focus },
-            burst = mode != CaptureMode.FOCUS_STACK,
-            roi = g.captureRoi(streams.captureSize),
-            highQuality = mode != CaptureMode.SUPER_RES,
-            bin = bin,
-        )
-        val roiPixels = spec.roi.width() / bin * (spec.roi.height() / bin)
-        val scale = if (mode == CaptureMode.SUPER_RES) Pipeline.superResScale(roiPixels) else 1
-        run {
+    private fun specFor(s: UiState, g: Geometry, streams: MicroscopeCamera.Streams, bin: Int) = MicroscopeCamera.CaptureSpec(
+        focus = if (s.mode == CaptureMode.FOCUS_STACK) stackPlan(s) else FloatArray(s.frames) { s.focus },
+        burst = s.mode != CaptureMode.FOCUS_STACK,
+        roi = g.captureRoi(streams.captureSize),
+        highQuality = s.mode != CaptureMode.SUPER_RES,
+        bin = bin,
+    )
+
+    /**
+     * Waits for the phone to settle, then captures. If the frames themselves do not fit in memory
+     * (a large sensor at low zoom), captures again with every 2 × 2 block averaged: the same field
+     * at half the resolution.
+     */
+    private suspend fun acquire(
+        app: Application, s: UiState, g: Geometry, streams: MicroscopeCamera.Streams,
+    ): Pair<MicroscopeCamera.CaptureSpec, List<YuvFrame>> {
+        // Let the jolt of pressing the shutter die away before exposing.
+        progress("Hold still", 0f)
+        val t0 = System.nanoTime()
+        val threshold = SteadyGate.threshold(g.lens.pixelPitchUm, g.lens.focalMm, s.telemetry.exposureNs ?: 33_000_000L)
+        val steady = SteadyHold.await(app, threshold, STEADY_TIMEOUT_MS)
+        Log.i(TAG, "steady=$steady after ${(System.nanoTime() - t0) / 1_000_000} ms (threshold %.3f rad/s)".format(threshold))
+        var bin = 1
+        while (true) {
+            val spec = specFor(s, g, streams, bin)
+            val n = spec.focus.size
             try {
-                // Let the jolt of pressing the shutter die away before exposing.
-                progress("Hold still", 0f)
-                val t0Steady = System.nanoTime()
-                val threshold = SteadyGate.threshold(g.lens.pixelPitchUm, g.lens.focalMm, s.telemetry.exposureNs ?: 33_000_000L)
-                val steady = SteadyHold.await(app, threshold, STEADY_TIMEOUT_MS)
-                Log.i(TAG, "steady=$steady after ${(System.nanoTime() - t0Steady) / 1_000_000} ms (threshold %.3f rad/s)".format(threshold))
                 progress("Capturing", 0f)
-                val frames = camera.capture(spec) { k -> progress("Capturing $k / $n", 0.3f * k / n) }
+                return spec to camera.capture(spec) { k -> progress("Capturing $k / $n", 0.3f * k / n) }
+            } catch (e: Throwable) {
+                if (!e.isOutOfMemory() || bin >= MAX_BIN) throw e
+                bin *= 2
+                Log.w(TAG, "out of memory while capturing; retrying at 1/$bin resolution")
+            }
+        }
+    }
+
+    /**
+     * Processes and saves [frames]. If processing runs out of memory, the same frames are binned
+     * 2 × 2 and processed again: no second exposure, and the scale follows.
+     */
+    private suspend fun develop(
+        app: Application, s: UiState, g: Geometry, streams: MicroscopeCamera.Streams,
+        spec: MicroscopeCamera.CaptureSpec, captured: List<YuvFrame>,
+    ) {
+        val mode = s.mode
+        var frames = captured
+        var bin = spec.bin
+        // A bracket in metric diopters also yields the surface height (focus variation).
+        val measure = mode == CaptureMode.FOCUS_STACK && g.lens.manualFocus && g.lens.focusIsMetric
+        val rotation = g.lens.sensorOrientation
+        while (true) {
+            val scale = if (mode == CaptureMode.SUPER_RES) Pipeline.superResScale(frames[0].width * frames[0].height) else 1
+            try {
                 progress(if (mode == CaptureMode.PHOTO) "Developing" else "Aligning ${frames.size} frames", 0.3f)
                 val t0 = System.nanoTime()
-                // A bracket in metric diopters also yields the surface height (focus variation).
-                val measure = mode == CaptureMode.FOCUS_STACK && g.lens.manualFocus && g.lens.focusIsMetric
-                val rotation = g.lens.sensorOrientation
+                val input = frames
                 val (rgb, height) = withContext(Dispatchers.Default) {
                     val onProgress = { p: Float ->
                         val label = when {
-                            p < 0.3f -> "Aligning ${frames.size} frames"
+                            p < 0.3f -> "Aligning ${input.size} frames"
                             mode == CaptureMode.FOCUS_STACK && measure && p >= 0.8f -> "Measuring height"
                             mode == CaptureMode.FOCUS_STACK -> "Fusing focus stack"
                             else -> "Merging burst"
                         }
                         progress(label, 0.3f + 0.6f * p)
                     }
-                    if (mode == CaptureMode.FOCUS_STACK && frames.size > 1) {
-                        val r = Pipeline.focusStack(frames, if (measure) spec.focus else null, onProgress)
+                    if (mode == CaptureMode.FOCUS_STACK && input.size > 1) {
+                        val r = Pipeline.focusStack(input, if (measure) spec.focus else null, onProgress)
                         r.image.rotated(rotation) to r.height?.rotated(rotation)
                     } else {
-                        Pipeline.process(mode, frames, sharpen = if (mode == CaptureMode.SUPER_RES) 0.5f else 0f, onProgress)
+                        Pipeline.process(mode, input, sharpen = if (mode == CaptureMode.SUPER_RES) 0.5f else 0f, onProgress)
                             .rotated(rotation) to null
                     }
                 }
-                Log.i(TAG, "$mode: ${frames.size} x ${spec.roi.width()}x${spec.roi.height()} -> ${rgb.width}x${rgb.height} in ${(System.nanoTime() - t0) / 1_000_000} ms")
+                Log.i(TAG, "$mode: ${frames.size} x ${frames[0].width}x${frames[0].height} (bin $bin) -> ${rgb.width}x${rgb.height} in ${(System.nanoTime() - t0) / 1_000_000} ms")
                 progress("Saving", 0.95f)
                 val umPerOut = s.umPerSensorPixel?.let { it * g.lens.activeArray.width() / streams.captureSize.width * bin / scale }
                 val meta = CaptureMeta(
@@ -484,13 +521,12 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 store(app, rgb, height, meta, umPerOut, "focus variation")
                 if (bin > 1) note("Saved at 1/$bin resolution to fit in memory; zoom in for full detail")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "capture failed", e)
-                note("Capture failed: ${e.message}")
-            } finally {
-                state.update { it.copy(processing = null) }
+                return
+            } catch (e: Throwable) {
+                if (!e.isOutOfMemory() || bin >= MAX_BIN || frames[0].width < 4 * MIN_BINNED_SIDE) throw e
+                bin *= 2
+                Log.w(TAG, "out of memory while processing; retrying the same frames at 1/$bin resolution")
+                frames = frames.map { it.binned(2) }
             }
         }
     }
@@ -679,12 +715,18 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
         val top = height.maxMm ?: 0f
         val share = 100f * height.validCount / (height.width * height.height)
         val picture = HeightRender.picture(height, fused.width, fused.height, approximate = true)
-        val text = "Surface height by %s, 0 to approx. %.3f mm, measured at %.0f%% of points; from %s"
-            .format(Locale.ROOT, method, top, share, meta.description)
+        // ISO 25178-2 height parameters after plane removal (no S/L filtering): relief, not roughness.
+        val params = AreaParameters.of(height)?.let {
+            "; after plane removal Sa %.3f, Sq %.3f, Sz %.3f mm, Ssk %.2f, Sku %.2f".format(Locale.ROOT, it.sa, it.sq, it.sz, it.ssk, it.sku)
+        } ?: ""
+        val text = "Surface height by %s, 0 to approx. %.3f mm, measured at %.0f%% of points%s; from %s"
+            .format(Locale.ROOT, method, top, share, params, meta.description)
         Gallery.save(app, picture, meta.copy(description = text), stem + "_height")
         picture.recycle()
         if (umPerOut != null) {
-            Gallery.saveDocument(app, "$stem.ply", "application/octet-stream", HeightRender.ply(height, rgb, umPerOut * height.step, method))
+            val umPerCell = umPerOut * height.step
+            Gallery.saveDocument(app, "$stem.ply", "application/octet-stream", HeightRender.ply(height, rgb, umPerCell, method))
+            Gallery.saveDocument(app, "$stem.gsf", "application/octet-stream", Gsf.encode(height, umPerCell, "Microscope: surface height by $method"))
         }
     }
 
@@ -782,6 +824,8 @@ class MicroscopeViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val TAG = "Microscope"
         const val MAX_ZOOM = 16f
+        private const val MAX_BIN = 4
+        private const val MIN_BINNED_SIDE = 64
         private const val STEADY_TIMEOUT_MS = 1500L
 
         /** A calibration line shorter than this many sensor pixels is too imprecise to use. */

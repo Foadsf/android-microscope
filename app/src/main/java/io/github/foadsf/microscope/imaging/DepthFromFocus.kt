@@ -15,7 +15,12 @@ class HeightMap(val width: Int, val height: Int, val step: Int, val mm: FloatArr
     val validCount: Int get() = mm.count { !it.isNaN() }
 
     /** Highest valid height (the lowest is 0 by construction), or null if nothing is valid. */
-    val maxMm: Float? get() = mm.filter { !it.isNaN() }.maxOrNull()
+    val maxMm: Float?
+        get() {
+            var top = Float.NaN
+            for (v in mm) if (!v.isNaN() && (top.isNaN() || v > top)) top = v
+            return if (top.isNaN()) null else top
+        }
 
     /** Rotates clockwise by a multiple of 90 degrees, like [RgbImage.rotated]. */
     fun rotated(degrees: Int): HeightMap {
@@ -169,7 +174,7 @@ object DepthFromFocus {
         }
 
         // Heights above the farthest point that is not an outlier (the 99th percentile of distance).
-        val valid = mmDist.filter { !it.isNaN() }.sorted()
+        val valid = mmDist.finiteSorted()
         val heights = FloatArray(mmDist.size) { Float.NaN }
         if (valid.isNotEmpty()) {
             val base = valid[((valid.size - 1) * 0.99f).toInt()]

@@ -217,10 +217,20 @@ class MicroscopeCamera(context: Context) {
             }
         }, imageHandler)
         try {
+            val alreadyHeld = exposureHeld
             exposureLocked = true
             startPreview(spec.focus.first())
-            withTimeoutOrNull(800) {
-                results.first { value(it, CaptureResult.CONTROL_AE_STATE) == CameraMetadata.CONTROL_AE_STATE_LOCKED }
+            // Wait for a frame made under the lock. Only results of requests that carry it count:
+            // frames still in flight from before were exposed unlocked. The spec says LOCKED, but
+            // some HALs keep reporting CONVERGED once locked, so that is accepted too.
+            if (!alreadyHeld) {
+                withTimeoutOrNull(800) {
+                    results.first {
+                        val st = value(it, CaptureResult.CONTROL_AE_STATE)
+                        it.request.get(CaptureRequest.CONTROL_AE_LOCK) == true &&
+                            (st == CameraMetadata.CONTROL_AE_STATE_LOCKED || st == CameraMetadata.CONTROL_AE_STATE_CONVERGED)
+                    }
+                }
             }
             val out = ArrayList<YuvFrame>(spec.focus.size)
             if (spec.burst) {
@@ -233,11 +243,16 @@ class MicroscopeCamera(context: Context) {
                 for (d in spec.focus) {
                     // Move the lens with the preview stream, wait for it to stop, then expose.
                     startPreview(d)
+                    val target = d.coerceIn(0f, l.minFocusDiopters)
                     withTimeoutOrNull(1500) {
                         results.first {
+                            // Frames still in flight were requested at the previous slice's focus;
+                            // only a result of the new request can say the lens has arrived.
+                            val asked = it.request.get(CaptureRequest.LENS_FOCUS_DISTANCE)
                             val st = value(it, CaptureResult.LENS_STATE)
                             val at = value(it, CaptureResult.LENS_FOCUS_DISTANCE) ?: d
-                            st != CameraMetadata.LENS_STATE_MOVING && (!l.focusIsMetric || abs(at - d) <= 0.1f + 0.03f * d)
+                            asked != null && abs(asked - target) < 1e-4f &&
+                                st != CameraMetadata.LENS_STATE_MOVING && (!l.focusIsMetric || abs(at - d) <= 0.1f + 0.03f * d)
                         }
                     }
                     s.capture(still(d, spec, ir.surface), resultCallback, handler)

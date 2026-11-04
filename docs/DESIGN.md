@@ -57,11 +57,21 @@ from one camera, with sub-pixel motion between them (super-resolution) or with d
   magnifies further.
 - **Captures** take the full sensor with no crop and copy only the visible region, at full
   resolution, out of each YUV frame, so what you see is what is processed. Before a burst, AE and
-  AWB are locked so every frame has the same exposure and colour.
+  AWB are locked so every frame has the same exposure and colour. The app waits (up to 0.8 s) for a
+  result whose *request* carried the lock, in state LOCKED or CONVERGED, since some HALs never
+  report LOCKED. It skips the wait when exposure is already held (Tilt mode).
   - Bursts use `captureBurst` with minimal noise reduction and no edge enhancement: the merge
     averages noise itself and sharpens once at the end.
   - Focus brackets move the lens with the preview stream, wait for `LENS_STATE` to report
     stationary at the target distance, and then expose with the ISP's high-quality processing.
+    Only results whose request carried the new `LENS_FOCUS_DISTANCE` count. Frames still in flight
+    were requested at the previous slice's focus, and with fine steps they could pass the distance
+    test, so a slice would be exposed before the lens had moved.
+- **Memory.** Capture streams are capped at 16.8 MP, which selects the binned mode of 48–200 MP
+  sensors. If the frames do not fit, they are captured again 2 × 2 binned. If processing runs out
+  of memory, the frames already captured are binned and processed again, with no second exposure.
+  An `OutOfMemoryError` is recognised anywhere in the cause chain, since parallel streams may wrap
+  it.
 - **Exposure compensation** is `CONTROL_AE_EXPOSURE_COMPENSATION` within
   `CONTROL_AE_COMPENSATION_RANGE`. It stays in force while AE is locked for a capture.
 - **Steady hold.** Pressing the shutter jolts the phone. Before capturing, the app waits (up to
@@ -86,6 +96,10 @@ does:
 - Sobel gradient magnitude of luma, for **focus peaking** (cyan) and for the **edge** filter, a
   dark-field-like rendering of relief and scratches;
 - mono;
+- **relief**: the luma gradient along the top-left diagonal on mid-grey, like oblique (raking)
+  light or DIC, for polished and machined metal;
+- focus peaking relative to local brightness, `g · 0.55 / (mean + 0.05)` (Weber contrast). It
+  equals the absolute threshold at mid-grey, and works alike on dark and bright specimens;
 - while the exposure slider is open, a **zebra**: diagonal screen-space stripes where any colour
   channel exceeds 0.98, so clipped highlights are visible while setting exposure.
 
@@ -213,7 +227,11 @@ lens whose focus it can step.
    and stay unknown.
 
 Outputs: a viridis picture the size of the fused one, with unknown cells dark grey and a legend,
-and a binary PLY point cloud (x, y, z in mm, coloured from the fused picture).
+a binary PLY point cloud (x, y, z in mm, coloured from the fused picture), and a Gwyddion Simple
+Field (`.gsf`: metres, float32, unknown cells as NaN, which Gwyddion 2.57 and later masks). The
+picture's description adds ISO 25178-2 height parameters after least-squares plane removal: Sa,
+Sq, Sz, Ssk, Sku. No S- or L-filter is applied, so they describe relief at the map's resolution,
+not roughness in the standard's filtered sense.
 
 Tests on a 7-slice depth ramp with σ = 1.5 noise:
 

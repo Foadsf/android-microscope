@@ -64,7 +64,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -482,6 +484,13 @@ private fun tiltCaption(t: TiltState): String = when {
  */
 @Composable
 private fun TiltOverlay(t: TiltState, sensorOrientation: Int) {
+    // A tick each time a view is taken (the reference and every sector), so the user can keep
+    // their eyes on the specimen instead of the status text.
+    val haptics = LocalHapticFeedback.current
+    val taken = t.filled.count { it } + if (t.referenceTaken) 1 else 0
+    LaunchedEffect(taken) {
+        if (taken > 0) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
     Canvas(Modifier.fillMaxSize()) {
         val c = Offset(size.width / 2, size.height / 2)
         val full = 0.36f * size.minDimension
@@ -643,6 +652,7 @@ private fun DrawScope.drawFilter(c: Color, f: Filter) {
         Filter.COLOUR -> drawArc(c, 90f, 180f, true, topLeft = Offset(1.dp.toPx(), 1.dp.toPx()), size = Size(size.width - 2.dp.toPx(), size.height - 2.dp.toPx()))
         Filter.MONO -> drawCircle(c, r * 0.45f)
         Filter.EDGES -> drawCircle(c, r * 0.45f, style = Stroke(1.5.dp.toPx()))
+        Filter.RELIEF -> drawArc(c, 135f, 180f, true, topLeft = Offset(r * 0.35f, r * 0.35f), size = Size(r * 1.3f, r * 1.3f))
     }
 }
 

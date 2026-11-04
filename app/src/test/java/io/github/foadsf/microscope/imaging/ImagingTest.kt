@@ -452,4 +452,59 @@ class ImagingTest {
         assertTrue("noise ratio $ratio", ratio in 0.45..0.58)
         assertTrue(f.binned(1) === f)
     }
+
+    @Test
+    fun areaParametersOfASinusoidOnATiltedPlane() {
+        // z = A·cos(2π(x − x̄)/λ) on a tilted plane: after plane removal Sa = 2A/π, Sq = A/√2,
+        // Ssk = 0, Sku = 1.5. Whole periods of a cosine centred on the strip are orthogonal to the
+        // plane's terms, so the plane fit is exact. Samples sit half a pixel off the crests, so
+        // Sz = 2A·cos(2π·0.5/λ).
+        val w = 240
+        val h = 60
+        val a = 0.05
+        val mm = FloatArray(w * h) { i ->
+            val x = (i % w).toDouble()
+            val y = (i / w).toDouble()
+            (a * kotlin.math.cos(2 * Math.PI * (x - (w - 1) / 2.0) / 24.0) + 0.002 * x - 0.003 * y + 1.0).toFloat()
+        }
+        mm[5] = Float.NaN // unknown cells are skipped
+        val p = AreaParameters.of(HeightMap(w, h, 1, mm, FloatArray(w * h)))!!
+        assertEquals(2 * a / Math.PI, p.sa, 1e-3)
+        assertEquals(a / sqrt(2.0), p.sq, 1e-3)
+        assertEquals(2 * a * kotlin.math.cos(Math.PI / 24), p.sz, 1e-3)
+        assertEquals(0.0, p.ssk, 0.02)
+        assertEquals(1.5, p.sku, 0.02)
+        assertEquals(w * h - 1, p.count)
+        // Too few cells: no parameters.
+        assertTrue(AreaParameters.of(HeightMap(4, 4, 1, FloatArray(16), FloatArray(16))) == null)
+    }
+
+    @Test
+    fun gsfExportRoundTrips() {
+        val mm = floatArrayOf(0f, 0.5f, Float.NaN, 1.25f, 2f, 0.1f)
+        val bytes = Gsf.encode(HeightMap(3, 2, 2, mm, FloatArray(6)), umPerCell = 20f, title = "test")
+        val nul = bytes.indexOf(0.toByte())
+        val header = String(bytes, 0, nul, Charsets.UTF_8)
+        assertTrue(header.startsWith("Gwyddion Simple Field 1.0\n"))
+        val fields = header.lines().drop(1).filter { "=" in it }.associate { it.substringBefore("=").trim() to it.substringAfter("=").trim() }
+        assertEquals("3", fields["XRes"])
+        assertEquals("2", fields["YRes"])
+        assertEquals(6e-5, fields["XReal"]!!.toDouble(), 1e-12) // 3 cells × 20 µm
+        assertEquals("m", fields["ZUnits"])
+        // One to four NULs, data aligned to 4 bytes, nothing after it.
+        val start = (nul / 4 + 1) * 4
+        for (i in nul until start) assertEquals(0.toByte(), bytes[i])
+        assertEquals(start + 4 * mm.size, bytes.size)
+        val data = java.nio.ByteBuffer.wrap(bytes, start, 4 * mm.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        for (v in mm) {
+            val got = data.float
+            if (v.isNaN()) assertTrue(got.isNaN()) else assertEquals(v * 1e-3f, got, 1e-9f)
+        }
+    }
+
+    @Test
+    fun finiteSortedDropsNaN() {
+        assertEquals(listOf(-1f, 2f, 3f), floatArrayOf(3f, Float.NaN, -1f, 2f, Float.NaN).finiteSorted().toList())
+        assertEquals(0, floatArrayOf(Float.NaN).finiteSorted().size)
+    }
 }

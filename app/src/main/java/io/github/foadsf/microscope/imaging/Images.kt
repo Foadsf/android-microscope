@@ -151,6 +151,17 @@ private fun clamp8(v: Float): Int {
     return if (r < 0) 0 else if (r > 255) 255 else r
 }
 
+/** The non-NaN values of this array, sorted ascending, without boxing. */
+internal fun FloatArray.finiteSorted(): FloatArray {
+    var n = 0
+    for (v in this) if (!v.isNaN()) n++
+    val out = FloatArray(n)
+    var k = 0
+    for (v in this) if (!v.isNaN()) out[k++] = v
+    out.sort()
+    return out
+}
+
 /** Full-range BT.601 (JFIF) YCbCr to ARGB. */
 internal fun ycbcrToArgb(y: Float, cb: Float, cr: Float): Int {
     val u = cb - 128f
@@ -188,15 +199,16 @@ fun YuvFrame.toRgb(): RgbImage = toRgb(lumaPlane(), uPlane(), vPlane())
  */
 fun estimateNoiseSigma(luma: Plane): Float {
     val step = maxOf(1, (luma.width * luma.height / 200_000))
-    val diffs = ArrayList<Float>()
+    val diffs = FloatArray((luma.data.size - 1) / step + 1)
+    var count = 0
     var i = 0
     while (i < luma.data.size - 1) {
-        if ((i + 1) % luma.width != 0) diffs.add(kotlin.math.abs(luma.data[i + 1] - luma.data[i]))
+        if ((i + 1) % luma.width != 0) diffs[count++] = kotlin.math.abs(luma.data[i + 1] - luma.data[i])
         i += step
     }
-    if (diffs.isEmpty()) return 1f
-    diffs.sort()
-    val median = diffs[diffs.size / 2]
+    if (count == 0) return 1f
+    java.util.Arrays.sort(diffs, 0, count)
+    val median = diffs[count / 2]
     // For Gaussian noise, MAD of the difference of two samples = 0.6745 * sqrt(2) * sigma.
     return (median / (0.6745f * 1.41421356f)).coerceAtLeast(0.5f)
 }

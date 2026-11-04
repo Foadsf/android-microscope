@@ -36,7 +36,7 @@ object Gallery {
         val name = "$stem.jpg"
 
         // ExifInterface edits files in place, so build the JPEG in the app cache first.
-        val tmp = File(context.cacheDir, "pending.jpg")
+        val tmp = File.createTempFile(stem, ".jpg", context.cacheDir)
         tmp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
         ExifInterface(tmp.absolutePath).apply {
             val stamp = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(now)
@@ -50,7 +50,9 @@ object Gallery {
             setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "${(meta.focalMm * 1000).toInt()}/1000")
             meta.fNumber?.let { setAttribute(ExifInterface.TAG_F_NUMBER, "${(it * 100).toInt()}/100") }
             meta.iso?.let { setAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY, it.toString()) }
-            meta.exposureNs?.let { setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (it / 1e9).toString()) }
+            // An exact rational in µs: a decimal is rounded to 1/10000 s by ExifInterface, which
+            // turns exposures under 0.1 ms into 0.
+            meta.exposureNs?.let { setAttribute(ExifInterface.TAG_EXPOSURE_TIME, "${(it + 500) / 1000}/1000000") }
             meta.umPerPixel?.let {
                 // Pixels per centimetre on the specimen, the standard EXIF way to carry a scale.
                 val perCm = 10_000.0 / it

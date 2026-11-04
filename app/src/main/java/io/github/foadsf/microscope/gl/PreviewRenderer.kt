@@ -33,7 +33,7 @@ data class RenderParams(
     val contrast: Float = 1.0f,
 )
 
-enum class Filter(val label: String) { COLOUR("Colour"), MONO("Mono"), EDGES("Edges") }
+enum class Filter(val label: String) { COLOUR("Colour"), MONO("Mono"), EDGES("Edges"), RELIEF("Relief") }
 
 /**
  * Draws the camera stream from a `GL_TEXTURE_EXTERNAL_OES` texture with one fragment pass: unsharp
@@ -263,9 +263,16 @@ void main() {
     } else if (uFilter == 2) {
         // Edge map on black: a dark-field-like rendering of relief and scratches.
         col = vec3(smoothstep(0.02, 0.6, g)) * vec3(0.85, 0.97, 1.0);
+    } else if (uFilter == 3) {
+        // Oblique light from the top left: the luma gradient along that direction on mid-grey,
+        // which reads as surface relief (like DIC or a raking light) on polished metal.
+        col = vec3(clamp(0.5 - 0.6 * (gx + gy), 0.0, 1.0));
     }
     if (uPeak == 1) {
-        float k = smoothstep(0.28, 0.55, g);
+        // Relative to the local brightness (Weber contrast), so peaking fires alike on dark and
+        // bright specimens; scaled to match the absolute thresholds at mid-grey.
+        float gn = g * 0.55 / (luma(blur) + 0.05);
+        float k = smoothstep(0.28, 0.55, gn);
         col = mix(col, vec3(0.37, 0.92, 0.83), k * 0.85);
     }
     if (uZebra == 1 && max(c.r, max(c.g, c.b)) > 0.98) {

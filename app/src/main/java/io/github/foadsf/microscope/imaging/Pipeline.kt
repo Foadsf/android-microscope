@@ -101,6 +101,10 @@ object Pipeline {
         val rt = Runtime.getRuntime()
         val free = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
         val workers = (free / 2 / perTask).toInt().coerceIn(1, minOf(n, rt.availableProcessors()))
+        // With memory for only one task at a time (large frames on a phone), run them in turn on
+        // this thread: inside a one-thread pool every parallelFor would run sequentially too, and
+        // all but one core would sit idle.
+        if (workers == 1) return List(n) { task(it) }
         val results = arrayOfNulls<Any>(n)
         val pool = ForkJoinPool(workers)
         try {
