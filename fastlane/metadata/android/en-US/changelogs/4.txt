@@ -1,0 +1,1 @@
+Fixes: focus-stack slices could be exposed before the lens arrived; needless exposure-lock waits; out-of-memory recovery no longer re-shoots; alignment uses all cores on phones; exact exposure time in EXIF. New: Gwyddion (.gsf) height export, Sa/Sq/Sz/Ssk/Sku, Relief view, brightness-relative focus peaking, haptic tick per Tilt view.
